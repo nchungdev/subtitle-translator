@@ -201,6 +201,7 @@ export type PipelineRuntimeConfig = TranslationConfig & {
   // standard per-request glossary block with the STRICT variant listing just
   // the violated terms. Never forwarded to services (not in optionalFields).
   strictGlossaryTerms?: GlossaryTerm[];
+  characterGraphPromptBlock?: string;
   /**
    * 【单元互相独立,必须逐单元往返】—— JSON 值这类调用方设置(经
    * buildRuntimeConfig 的 independent 选项)。它必须压住【两条】批处理路径:
@@ -461,11 +462,18 @@ const translateSingle = async (text: string, cacheSuffix: string, config: Pipeli
     // Appending to an empty base would otherwise drop the default prompt:
     // services treat a non-empty systemPrompt as "user configured" verbatim.
     const base = config.systemPrompt?.trim() ? config.systemPrompt : DEFAULT_SYSTEM_PROMPT;
+    let extraPrompts = "";
     if (config.strictGlossaryTerms?.length) {
-      extras.systemPrompt = base + buildStrictGlossaryPromptBlock(config.strictGlossaryTerms);
+      extraPrompts += buildStrictGlossaryPromptBlock(config.strictGlossaryTerms);
     } else {
       const matched = filterTermsMatchingText(ctx.getGlossaryTerms(config.targetLanguage), text);
-      if (matched.length > 0) extras.systemPrompt = base + buildGlossaryPromptBlock(matched);
+      if (matched.length > 0) extraPrompts += buildGlossaryPromptBlock(matched);
+    }
+    if (config.characterGraphPromptBlock) {
+      extraPrompts += config.characterGraphPromptBlock;
+    }
+    if (extraPrompts) {
+      extras.systemPrompt = base + extraPrompts;
     }
   } else if (config.translationMethod === "qwenMt") {
     // Qwen-MT: native terminology intervention instead of a prompt block.

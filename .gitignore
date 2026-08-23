@@ -33,6 +33,9 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# local API keys for the character-graph prototype script — never commit
+.character-graph.config.json
+
 # vercel
 .vercel
 
@@ -42,3 +45,7 @@ next-env.d.ts
 
 # tauri
 src-tauri
+
+# ide & local tools
+.idea/
+.claude/

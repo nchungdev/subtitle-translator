@@ -1,9 +1,33 @@
 "use client";
 
 import React, { useState, useMemo, useRef } from "react";
-import { Flex, Card, Button, Typography, Input, Upload, Form, Space, App, Tooltip, Segmented, Spin, Row, Col, Divider, Collapse, Alert, theme } from "antd";
-import { SettingOutlined, CopyOutlined, InboxOutlined, FileTextOutlined, ClearOutlined, FormatPainterOutlined, GlobalOutlined, ImportOutlined, SaveOutlined, ControlOutlined } from "@ant-design/icons";
+import { Flex, Card, Button, Typography, Input, Upload, Form, Space, App, Tooltip, Segmented, Spin, Row, Col, Divider, Collapse, Alert, theme, Progress, Tag } from "antd";
+import {
+  SettingOutlined,
+  CopyOutlined,
+  InboxOutlined,
+  FileTextOutlined,
+  ClearOutlined,
+  FormatPainterOutlined,
+  GlobalOutlined,
+  ImportOutlined,
+  SaveOutlined,
+  ControlOutlined,
+  ScissorOutlined,
+  BranchesOutlined,
+  FolderOpenOutlined,
+  CloseOutlined,
+  DownOutlined,
+  UpOutlined,
+  CheckCircleOutlined,
+  CloseCircleOutlined,
+  ClockCircleOutlined,
+  DownloadOutlined,
+  ShareAltOutlined,
+} from "@ant-design/icons";
 import { useTranslations } from "next-intl";
+import JSZip from "jszip";
+import CharacterGraphModal from "@/app/components/CharacterGraphModal";
 import { useCopyToClipboard } from "@/app/hooks/useCopyToClipboard";
 import useFileUpload from "@/app/hooks/useFileUpload";
 import { useResetOnSourceChange } from "@/app/hooks/useResetOnSourceChange";
@@ -30,6 +54,7 @@ import {
 import { LLM_MODELS } from "@/app/lib/translation";
 import { transformSkippingSoftFilled } from "@/app/lib/translation/softFill";
 import { delay } from "@/app/lib/translation/retry";
+import BilingualTranslateModal, { type BackgroundTaskPayload } from "@/app/components/BilingualTranslateModal";
 import { useLanguageOptions } from "@/app/components/languages";
 import LanguageSelector from "@/app/components/LanguageSelector";
 import ApiStatusBlock from "@/app/components/ApiStatusBlock";
@@ -43,14 +68,180 @@ import AdvancedTranslationSettings from "@/app/components/AdvancedTranslationSet
 import TranslateFailurePanel from "@/app/components/TranslateFailurePanel";
 
 import MultiLanguageSettingsModal from "@/app/components/MultiLanguageSettingsModal";
+import SplitBilingualModal from "@/app/components/SplitBilingualModal";
 import SourceArea from "@/app/components/SourceArea";
+
+const { Text } = Typography;
+
+const BackgroundBatchProgressStrip = ({
+  task,
+  onOpenModal,
+  onDismiss,
+}: {
+  task: BackgroundTaskPayload;
+  onOpenModal: () => void;
+  onDismiss: () => void;
+}) => {
+  const tSubtitle = useTranslations("SubtitleTranslator");
+  const t = useTranslations("common");
+  const { token } = theme.useToken();
+  const [expanded, setExpanded] = useState(false);
+
+  const total = task.items.length;
+  const doneItems = task.items.filter((it) => it.status === "done");
+  const errorItems = task.items.filter((it) => it.status === "error");
+  const completedCount = doneItems.length + errorItems.length;
+  const percent = total > 0 ? Math.floor((completedCount / total) * 100) : 0;
+  const isDone = !task.isProcessing;
+
+  const title =
+    task.type === "bilingual"
+      ? isDone
+        ? tSubtitle("bilingualTranslateDone", { count: doneItems.length })
+        : tSubtitle("bilingualTranslatingProgress", { current: completedCount, total })
+      : isDone
+      ? tSubtitle("splitDone", { count: doneItems.length })
+      : tSubtitle("splitProgress", { current: completedCount, total });
+
+  const marker = isDone ? "DONE" : "IN PROGRESS";
+  const monoCaps: React.CSSProperties = { fontSize: 11, letterSpacing: "0.18em", textTransform: "uppercase" };
+
+  const handleDownloadAllCompleted = async () => {
+    if (doneItems.length === 0) return;
+    if (doneItems.length === 1 && doneItems[0].content) {
+      downloadFile(doneItems[0].content, doneItems[0].fileName);
+      return;
+    }
+    const zip = new JSZip();
+    for (const item of doneItems) {
+      if (item.content) {
+        zip.file(item.fileName, item.content);
+      }
+    }
+    const blob = await zip.generateAsync({ type: "blob" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = task.zipFileName || "translated_subtitles.zip";
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div
+      role="status"
+      style={{
+        border: `1px solid ${isDone ? token.colorSuccessBorder : token.colorBorderSecondary}`,
+        borderRadius: token.borderRadiusLG,
+        background: token.colorBgContainer,
+        padding: "12px 14px",
+        marginTop: 12,
+      }}>
+      <div className="font-mono flex items-center justify-between" style={{ ...monoCaps, color: token.colorTextTertiary, marginBottom: 10 }}>
+        <span className="flex items-center" style={{ gap: 7 }}>
+          <span style={{ width: 7, height: 7, background: isDone ? token.colorSuccess : token.colorPrimary, display: "inline-block" }} />
+          {marker}
+          <span className="font-display" style={{ fontSize: 15, fontWeight: 700, letterSpacing: 0, textTransform: "none", color: isDone ? token.colorSuccess : token.colorText }}>
+            {percent}%
+          </span>
+        </span>
+        <span>
+          <span style={{ color: token.colorText }}>{completedCount}</span>
+          <span style={{ opacity: 0.5 }}> / {total}</span>
+        </span>
+      </div>
+
+      <Progress
+        percent={percent}
+        status={isDone ? "success" : "active"}
+        showInfo={false}
+        strokeLinecap="butt"
+        size={{ height: 6 }}
+        style={{ marginBottom: 10, lineHeight: 1 }}
+      />
+
+      <div className="flex items-center justify-between" style={{ gap: 12 }}>
+        <Text strong style={{ fontSize: 13, flex: 1, minWidth: 0 }} ellipsis>
+          {title}
+        </Text>
+        <Space size="small">
+          {doneItems.length > 0 && (
+            <Button size="small" type="primary" icon={<DownloadOutlined />} onClick={handleDownloadAllCompleted}>
+              {doneItems.length > 1 ? `${t("download")} (${doneItems.length})` : t("download")}
+            </Button>
+          )}
+          <Button
+            size="small"
+            type="text"
+            icon={expanded ? <UpOutlined /> : <DownOutlined />}
+            onClick={() => setExpanded(!expanded)}
+          >
+            {expanded
+              ? t.has("hideResults") ? t("hideResults") : "Thu gọn"
+              : t.has("showResults") ? t("showResults") : "Hiện chi tiết"}
+          </Button>
+          <Button size="small" icon={<FolderOpenOutlined />} onClick={onOpenModal}>
+            {tSubtitle("viewResults")}
+          </Button>
+          {task.isProcessing ? (
+            <Button size="small" onClick={task.onCancel}>
+              {t("cancel")}
+            </Button>
+          ) : (
+            <Button size="small" type="text" icon={<CloseOutlined />} onClick={onDismiss} aria-label={t("dismiss")} />
+          )}
+        </Space>
+      </div>
+
+      {expanded && (
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${token.colorBorderSecondary}`, maxHeight: 220, overflowY: "auto" }}>
+          <Flex vertical gap={6}>
+            {task.items.map((item) => (
+              <Flex key={item.key} justify="space-between" align="center" style={{ fontSize: 12, padding: "6px 10px", background: token.colorFillAlter, borderRadius: token.borderRadiusSM }}>
+                <Space size="small" style={{ minWidth: 0, flex: 1 }}>
+                  {item.status === "done" && <CheckCircleOutlined style={{ color: token.colorSuccess }} />}
+                  {item.status === "processing" && (
+                    <Space size={4}>
+                      <Spin size="small" />
+                      {item.step && (
+                        <Tag color="processing" style={{ margin: 0, fontSize: 10, lineHeight: "16px", padding: "0 4px" }}>
+                          Bước {item.step.current}/{item.step.total}
+                        </Tag>
+                      )}
+                    </Space>
+                  )}
+                  {item.status === "error" && <CloseCircleOutlined style={{ color: token.colorError }} />}
+                  {item.status === "pending" && <ClockCircleOutlined style={{ color: token.colorTextTertiary }} />}
+                  <Text ellipsis style={{ fontSize: 12, maxWidth: 260 }}>{item.fileName}</Text>
+                  {item.progressLabel && <Text type="secondary" style={{ fontSize: 11 }}>({item.progressLabel})</Text>}
+                </Space>
+                {item.status === "done" && item.content && (
+                  <Button
+                    size="small"
+                    type="link"
+                    icon={<DownloadOutlined />}
+                    onClick={() => downloadFile(item.content!, item.fileName)}
+                  >
+                    {t("download")}
+                  </Button>
+                )}
+                {item.status === "error" && (
+                  <Text type="danger" style={{ fontSize: 11 }}>{item.errorMessage || t("failed")}</Text>
+                )}
+              </Flex>
+            ))}
+          </Flex>
+        </div>
+      )}
+    </div>
+  );
+};
 
 import dynamic from "next/dynamic";
 const AssStyleDrawer = dynamic(() => import("./AssStyleDrawer"), { ssr: false });
 
 const { TextArea } = Input;
 const { Dragger } = Upload;
-const { Text } = Typography;
 
 const uploadFileTypes = getFileTypePresetConfig("subtitle");
 
@@ -80,6 +271,7 @@ const SubtitleTranslator = () => {
   const {
     exportSettings,
     importSettings,
+    setApiSettingsOpen,
     translationMethod,
     translateBatch,
     runTranslation,
@@ -89,6 +281,14 @@ const SubtitleTranslator = () => {
     setTargetLanguages,
     useCache,
     setUseCache,
+    characterGraphEnabled,
+    setCharacterGraphEnabled,
+    characterGraphProvider,
+    setCharacterGraphProvider,
+    getCharacterGraphConfig,
+    updateCharacterGraphConfig,
+    translationPhase,
+    getSelectedConfig,
     removeChars,
     setRemoveChars,
     multiLanguageMode,
@@ -184,12 +384,18 @@ const SubtitleTranslator = () => {
   const showNativeRebuildChoice = needsBilingual && nativeAss;
   // 「ASS 样式」可调:SRT/VTT 转 ASS,或 原生 ASS + 重新排版。
   const showAssStyle = (showBilingualFormatChoice && bilingualFormat === "ass") || (showNativeRebuildChoice && assNativeRebuild);
+  const [collapseInputList, setCollapseInputList] = useLocalStorage<boolean>("subtitle-translator-collapseInputList", false);
   const [contextAware, setContextAware] = useLocalStorage("subtitle-translator-contextAware", SUBTITLE_DEFAULTS.contextAware); // 上下文感知翻译开关,默认值与 CLI 共用
   // 面板 key 必须与下方 Collapse items 的 key("subtitle"/"advanced")一致 ——
   // 旧默认值 "SubtitleTranslator" 不匹配任何面板,导出控件永远默认收起。
   const [collapseKeys, setCollapseKeys] = useLocalStorage<string[]>("subtitle-translator-collapseKeys", ["subtitle"]);
   const [multiLangModalOpen, setMultiLangModalOpen] = useState(false);
   const [assStyleOpen, setAssStyleOpen] = useState(false);
+  const [splitModalOpen, setSplitModalOpen] = useState(false);
+  const [bilingualTranslateModalOpen, setBilingualTranslateModalOpen] = useState(false);
+  const [characterGraphModalOpen, setCharacterGraphModalOpen] = useState(false);
+  const [bilingualTask, setBilingualTask] = useState<BackgroundTaskPayload | null>(null);
+  const [splitTask, setSplitTask] = useState<BackgroundTaskPayload | null>(null);
   // 提取出的纯文本预览 — 只在 SubtitleTranslator 和 MDTranslator 用,
   // 不应该污染 TranslationProvider 的共享 state。
   const [extractedText, setExtractedText] = useState("");
@@ -562,9 +768,19 @@ const SubtitleTranslator = () => {
     setNeedsBilingualSuffix(false);
     setTranslatedTextBilingual(false);
     setTranslatedTextLang(null);
+    setBilingualTask(null);
+    setSplitTask(null);
     clearLiveLines();
     clearFailures();
   };
+
+  const customHeadline = useMemo(() => {
+    if (!characterGraphEnabled) return undefined;
+    if (translationPhase === "graph") return t.has("stepGraphExtract") ? t("stepGraphExtract") : "Bước 1/2: Đang phân tích Đồ thị quan hệ & xưng hô...";
+    if (translationPhase === "translating" && (isTranslating || progressPercent > 0)) return t.has("stepTranslating") ? t("stepTranslating") : "Bước 2/2: Đang dịch nội dung phụ đề...";
+    if (translationPhase === "done" && progressPercent >= 100) return t.has("stepGraphDone") ? t("stepGraphDone") : "Hoàn tất (Đã áp dụng quy tắc xưng hô)";
+    return undefined;
+  }, [characterGraphEnabled, translationPhase, isTranslating, progressPercent, t]);
 
   return (
     <Spin spinning={isFileProcessing} description={t("pleaseWait")} size="large">
@@ -578,21 +794,33 @@ const SubtitleTranslator = () => {
               </Space>
             }
             extra={
-              <Tooltip title={t("resetUploadTooltip")}>
-                <Button
-                  type="text"
-                  danger
-                  disabled={isTranslating}
-                  onClick={() => {
-                    resetUpload();
-                    clearResults();
-                    message.success(t("resetUploadSuccess"));
-                  }}
-                  icon={<ClearOutlined />}
-                  aria-label={t("clearAll")}>
-                  {t("clearAll")}
-                </Button>
-              </Tooltip>
+              <Space>
+                {fileList.length > 0 && (
+                  <Button
+                    type="text"
+                    icon={collapseInputList ? <DownOutlined /> : <UpOutlined />}
+                    onClick={() => setCollapseInputList(!collapseInputList)}>
+                    {collapseInputList
+                      ? `${t.has("expandList") ? t("expandList") : "Hiện danh sách"} (${fileList.length})`
+                      : t.has("collapseList") ? t("collapseList") : "Thu gọn danh sách"}
+                  </Button>
+                )}
+                <Tooltip title={t("resetUploadTooltip")}>
+                  <Button
+                    type="text"
+                    danger
+                    disabled={isTranslating}
+                    onClick={() => {
+                      resetUpload();
+                      clearResults();
+                      message.success(t("resetUploadSuccess"));
+                    }}
+                    icon={<ClearOutlined />}
+                    aria-label={t("clearAll")}>
+                    {t("clearAll")}
+                  </Button>
+                </Tooltip>
+              </Space>
             }
             style={cardStyle}>
             <Dragger
@@ -603,7 +831,7 @@ const SubtitleTranslator = () => {
               }}
               accept={uploadFileTypes.accept}
               multiple={!singleFileMode}
-              showUploadList
+              showUploadList={!collapseInputList}
               beforeUpload={singleFileMode ? resetUpload : undefined}
               onRemove={(file) => {
                 clearResults();
@@ -619,6 +847,17 @@ const SubtitleTranslator = () => {
                 {t("supportedFormats")} {uploadFileTypes.label}
               </p>
             </Dragger>
+
+            {collapseInputList && fileList.length > 0 && (
+              <div style={{ marginTop: 8, padding: "8px 12px", background: token.colorFillAlter, borderRadius: token.borderRadiusSM, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  📁 {t.has("filesSelectedCount") ? t("filesSelectedCount", { count: fileList.length }) : `Đã chọn ${fileList.length} tệp phụ đề`}
+                </Text>
+                <Button type="link" size="small" onClick={() => setCollapseInputList(false)}>
+                  {t.has("expandList") ? t("expandList") : "Hiện danh sách"}
+                </Button>
+              </div>
+            )}
 
             {uploadMode === "single" && (
               <SourceArea
@@ -640,32 +879,78 @@ const SubtitleTranslator = () => {
                 size="large"
                 icon={<GlobalOutlined spin={isTranslating} />}
                 className="flex-1"
-                onClick={() => (uploadMode === "single" ? runTranslation(performTranslation, sourceText, contextAware ? "subtitle" : undefined) : handleMultipleTranslate())}
+                onClick={() => {
+                  if (!bilingualTask?.isProcessing) setBilingualTask(null);
+                  if (!splitTask?.isProcessing) setSplitTask(null);
+                  if (uploadMode === "single") {
+                    runTranslation(performTranslation, sourceText, contextAware ? "subtitle" : undefined);
+                  } else {
+                    handleMultipleTranslate();
+                  }
+                }}
                 disabled={isTranslating}
                 loading={isTranslating}>
                 {multiLanguageMode ? `${t("translate")} (${targetLanguages.length})` : t("translate")}
               </Button>
+
+              {(uploadMode === "single" ? !!sourceText : multipleFiles.length > 0) && (
+                <Button size="large" icon={<ShareAltOutlined />} onClick={() => setCharacterGraphModalOpen(true)}>
+                  {tSubtitle.has("viewCharacterGraph") && !tSubtitle("viewCharacterGraph").includes("viewCharacterGraph")
+                    ? tSubtitle("viewCharacterGraph")
+                    : t.has("viewCharacterGraph") && !t("viewCharacterGraph").includes("viewCharacterGraph")
+                    ? t("viewCharacterGraph")
+                    : "Xem đồ thị quan hệ"}
+                </Button>
+              )}
 
               {uploadMode === "single" && sourceText && (
                 <Button size="large" onClick={handleExtractText} icon={<FormatPainterOutlined />}>
                   {t("extractText")}
                 </Button>
               )}
+
+              {(uploadMode === "single" ? !!sourceText : multipleFiles.length > 0) && sourceFileType === "ass" && (
+                <Button size="large" onClick={() => setSplitModalOpen(true)} icon={<ScissorOutlined />}>
+                  {tSubtitle("splitButton")}
+                </Button>
+              )}
+
+              {(uploadMode === "single" ? !!sourceText : multipleFiles.length > 0) && sourceFileType === "ass" && (
+                <Button size="large" onClick={() => setBilingualTranslateModalOpen(true)} icon={<BranchesOutlined />}>
+                  {tSubtitle("bilingualTranslateButton")}
+                </Button>
+              )}
             </Flex>
 
-            <TranslationProgressStrip
-              isTranslating={isTranslating}
-              percent={progressPercent}
-              onCancel={requestCancel}
-              resumable={useCache}
-              onDismiss={resetProgress}
-              multiLanguageMode={multiLanguageMode}
-              targetLanguageCount={targetLanguages.length}
-              failed={failedCount > 0 || failedLangs.length > 0 || runHadFailures}
-              lineFailures={failedCount > 0}
-              currentCount={progressInfo.current}
-              totalCount={progressInfo.total}
-            />
+            {bilingualTask ? (
+              <BackgroundBatchProgressStrip
+                task={bilingualTask}
+                onOpenModal={() => setBilingualTranslateModalOpen(true)}
+                onDismiss={() => setBilingualTask(null)}
+              />
+            ) : splitTask ? (
+              <BackgroundBatchProgressStrip
+                task={splitTask}
+                onOpenModal={() => setSplitModalOpen(true)}
+                onDismiss={() => setSplitTask(null)}
+              />
+            ) : (
+              <TranslationProgressStrip
+                isTranslating={isTranslating}
+                percent={progressPercent}
+                onCancel={requestCancel}
+                resumable={useCache}
+                onDismiss={resetProgress}
+                multiLanguageMode={multiLanguageMode}
+                targetLanguageCount={targetLanguages.length}
+                failed={failedCount > 0 || failedLangs.length > 0 || runHadFailures}
+                lineFailures={failedCount > 0}
+                currentCount={progressInfo.current}
+                totalCount={progressInfo.total}
+                customHeadline={customHeadline}
+                onDownload={translatedText ? handleExportFile : undefined}
+              />
+            )}
 
             {/* 实时逐行结果 —— 与进度条并行:每定稿一行立即出现,不等整批。
                 ⚠ 只在【跑动时】渲染。它的全部价值是"等待时看见正在发生什么";
@@ -863,6 +1148,15 @@ const SubtitleTranslator = () => {
                       setRequestTimeoutSec={setRequestTimeoutSec}
                       useCache={useCache}
                       setUseCache={setUseCache}
+                      characterGraphEnabled={characterGraphEnabled}
+                      setCharacterGraphEnabled={setCharacterGraphEnabled}
+                      characterGraphProvider={characterGraphProvider}
+                      setCharacterGraphProvider={setCharacterGraphProvider}
+                      getCharacterGraphConfig={getCharacterGraphConfig}
+                      updateCharacterGraphConfig={updateCharacterGraphConfig}
+                      setApiSettingsOpen={setApiSettingsOpen}
+                      translationMethod={translationMethod}
+                      activeModel={getSelectedConfig()?.model}
                       singleFileMode={singleFileMode}
                       setSingleFileMode={setSingleFileMode}
                     />
@@ -938,6 +1232,36 @@ const SubtitleTranslator = () => {
         targetLanguages={targetLanguages}
         setTargetLanguages={setTargetLanguages}
         setMultiLanguageMode={setMultiLanguageMode}
+      />
+
+      <SplitBilingualModal
+        open={splitModalOpen}
+        onClose={() => setSplitModalOpen(false)}
+        sourceText={sourceText}
+        fileName={multipleFiles[0]?.name || "subtitle.ass"}
+        uploadMode={uploadMode}
+        multipleFiles={multipleFiles}
+        readFile={readFile}
+        onTaskChange={setSplitTask}
+      />
+
+      <BilingualTranslateModal
+        open={bilingualTranslateModalOpen}
+        onClose={() => setBilingualTranslateModalOpen(false)}
+        sourceText={sourceText}
+        fileName={multipleFiles[0]?.name || "subtitle.ass"}
+        contextAware={contextAware}
+        uploadMode={uploadMode}
+        multipleFiles={multipleFiles}
+        readFile={readFile}
+        onTaskChange={setBilingualTask}
+      />
+
+      <CharacterGraphModal
+        open={characterGraphModalOpen}
+        onClose={() => setCharacterGraphModalOpen(false)}
+        sourceText={sourceText}
+        fileName={multipleFiles[0]?.name || "subtitle.ass"}
       />
 
       <AssStyleDrawer

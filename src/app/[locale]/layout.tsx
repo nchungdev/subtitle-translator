@@ -12,6 +12,8 @@ import BackTop from "@/app/components/BackTop";
 import { SITE_URL } from "@/app/lib/seo";
 import { Schibsted_Grotesk, Fragment_Mono } from "next/font/google";
 
+import PerformanceGuard from "@/app/components/PerformanceGuard";
+
 // Interlingua typography: Schibsted Grotesk (display + body) and Fragment Mono
 // (meta labels), exposed as CSS vars (--font-sans / --font-mono) that globals.css
 // and ThemesProvider consume. Self-hosted via next/font, no FOUT.
@@ -68,6 +70,7 @@ export default async function LocaleLayout({ children, params }: Props) {
   return (
     <html lang={locale} dir={direction} suppressHydrationWarning className={`${fontGrotesk.variable} ${fontMono.variable}`}>
       <body>
+        <PerformanceGuard />
         <AntdRegistry>
           <NextIntlClientProvider messages={messages}>
             <ThemesProvider>

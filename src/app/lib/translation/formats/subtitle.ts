@@ -366,6 +366,193 @@ export const filterSubLines = (lines: string[], fileType: string) => {
 };
 
 /**
+ * ASS [Events] 里 Style 字段所在的列号。多数文件用默认顺序(Layer,Start,End,
+ * Style,...)= 3,但 Format 行允许重排字段,所以按 Format 行实际解析,而不是
+ * 硬编码下标 —— 与 filterSubLines 对 Text 字段(assContentStartIndex)的处理同思路。
+ * 找不到 Format 行(或其中没有 "Style")时回落到 3。
+ */
+const findAssStyleFieldIndex = (lines: string[], eventIndex: number): number => {
+  const formatIndex = findAssEventsFormatLineIndex(lines, eventIndex);
+  const formatLine = lines[formatIndex];
+  if (!/^format:/i.test(formatLine)) return 3;
+  const fields = formatLine
+    .slice(formatLine.indexOf(":") + 1)
+    .split(",")
+    .map((f) => f.trim().toLowerCase());
+  const idx = fields.indexOf("style");
+  return idx === -1 ? 3 : idx;
+};
+
+export interface AssStyleInfo {
+  name: string;
+  dialogueCount: number;
+  sampleText: string;
+}
+
+/**
+ * 双语 ASS 拆分单语的第一步:按 [Events] 里各 Dialogue 行的 Style 字段分组,
+ * 统计每个样式的台词行数并取一条非空文本作预览 —— 供拆分 UI 展示"这个样式
+ * 是哪种语言"。只统计 Dialogue(不含 Comment,后者多是分段注释如
+ * "--------------TEXT CN----------------",计入行数会误导用户)。
+ * 按行数降序返回,行数最多的样式(通常就是正片对白)排在前面。
+ */
+export const parseAssDialogueStyles = (text: string): AssStyleInfo[] => {
+  const lines = text.split(/\r\n|\r|\n/);
+  const eventIndex = lines.findIndex((line) => /^\[events\]$/i.test(line.trim()));
+  if (eventIndex === -1) return [];
+
+  const styleFieldIndex = findAssStyleFieldIndex(lines, eventIndex);
+  const textFieldIndex = Math.max(styleFieldIndex, 9);
+
+  const info = new Map<string, AssStyleInfo>();
+  for (let i = eventIndex; i < lines.length; i++) {
+    const line = lines[i];
+    if (!/^dialogue:/i.test(line)) continue;
+    const parts = line.split(",");
+    if (parts.length <= styleFieldIndex) continue;
+    const style = parts[styleFieldIndex].trim();
+    if (!style) continue;
+    const text = parts.length > textFieldIndex ? parts.slice(textFieldIndex).join(",").trim() : "";
+
+    const existing = info.get(style);
+    if (existing) {
+      existing.dialogueCount++;
+      if (!existing.sampleText && text) existing.sampleText = text;
+    } else {
+      info.set(style, { name: style, dialogueCount: 1, sampleText: text });
+    }
+  }
+
+  return Array.from(info.values()).sort((a, b) => b.dialogueCount - a.dialogueCount);
+};
+
+export interface AssSplitGroup {
+  label: string;
+  styles: string[];
+}
+
+export interface AssDetectedGroup extends AssSplitGroup {
+  /** 该语言分组下所有变体样式的台词行数合计,供弹窗展示"这门语言有多少行" */
+  count: number;
+}
+
+export interface AssLanguageDetection {
+  /** 检测到的"主语言"分组,每组已按变体(见下)合并、按台词行数降序排列 */
+  mainGroups: AssDetectedGroup[];
+  /** 不属于任何主语言分组的样式(OP/ED 歌词、STAFF 名单、标题贴纸等零星样式) */
+  minorStyles: AssStyleInfo[];
+}
+
+// 去掉样式名末尾的括注变体后缀 —— 同一语言常见的"正常位/上移位"两份样式
+// (如 "CN"/"CN(UP)"、"JP"/"JP(UP)")本质是同一条语言轨,只是排版位置不同,
+// 拆分时应合并计入同一语言,而不是被当成第三种"语言"摆在用户面前。
+const stripAssStyleVariantSuffix = (name: string): string => {
+  const base = name.replace(/\s*\([^)]*\)\s*$/, "").trim();
+  return base || name;
+};
+
+/**
+ * 从解析出的样式列表里猜"这份双语 ASS 到底是几种语言"——按去掉括注变体后的
+ * 基础名分组、按台词行数排序,取台词量达到最高组 40% 以上的视为"主语言"
+ * (双语对白通常两条语言行数相近),其余(OP/ED 歌词、STAFF、标题贴纸等零星
+ * 样式,行数远少于正片对白)归为"次要样式"。40% 是经验阈值,不追求完美,只
+ * 求把 Split 弹窗的默认视图从"七八个样式随手勾"降到"这份文件是 N 种语言,
+ * 对不对"这一句话。用户仍可在高级视图里手动改样式归属。
+ */
+export const detectAssLanguageGroups = (styles: AssStyleInfo[]): AssLanguageDetection => {
+  const totals = new Map<string, { label: string; styles: string[]; count: number }>();
+  for (const s of styles) {
+    const base = stripAssStyleVariantSuffix(s.name);
+    const entry = totals.get(base) ?? { label: base, styles: [], count: 0 };
+    entry.styles.push(s.name);
+    entry.count += s.dialogueCount;
+    totals.set(base, entry);
+  }
+
+  const grouped = Array.from(totals.values()).sort((a, b) => b.count - a.count);
+  const maxCount = grouped[0]?.count ?? 0;
+  const threshold = maxCount * 0.4;
+  const mainGroups = grouped.filter((g) => g.count > 0 && g.count >= threshold).map(({ label, styles, count }) => ({ label, styles, count }));
+
+  const mainStyleNames = new Set(mainGroups.flatMap((g) => g.styles));
+  const minorStyles = styles.filter((s) => !mainStyleNames.has(s.name));
+
+  return { mainGroups, minorStyles };
+};
+
+/**
+ * 把双语 ASS(不同语言分别落在不同 Style,如 CN/JP 两套对白样式共存于同一份
+ * [Events])按用户分组拆成 N 份单语 ASS。[Script Info]/[V4+ Styles] 原样保留在
+ * 每一份输出里(未引用的样式定义对播放器无害),只按 Style 字段过滤
+ * [Events] 里的 Dialogue/Comment 行。空分组(未勾选任何样式)被跳过。
+ */
+export const splitAssByStyles = (text: string, groups: AssSplitGroup[]): { label: string; content: string }[] => {
+  const lines = text.split(/\r\n|\r|\n/);
+  const eventIndex = lines.findIndex((line) => /^\[events\]$/i.test(line.trim()));
+  if (eventIndex === -1) return [];
+
+  const styleFieldIndex = findAssStyleFieldIndex(lines, eventIndex);
+
+  const eventStyleOf = (line: string): string | null => {
+    if (!/^(dialogue|comment):/i.test(line)) return null;
+    const parts = line.split(",");
+    return (parts[styleFieldIndex] ?? "").trim();
+  };
+
+  return groups
+    .filter((g) => g.styles.length > 0)
+    .map((g) => {
+      const wanted = new Set(g.styles);
+      const outLines = lines.filter((line, i) => {
+        // 事件区之前(脚本信息、样式表、[Events] 头本身)原样保留
+        if (i < eventIndex) return true;
+        const style = eventStyleOf(line);
+        // null = 非 Dialogue/Comment 行(Format 行、空行等),原样保留
+        return style === null || wanted.has(style);
+      });
+      return { label: g.label, content: outLines.join("\n") };
+    });
+};
+
+// [Events] 区块的正文起点 = eventIndex 之后第一条 Format: 行。splitAssByStyles /
+// parseAssDialogueStyles / mergeAssOutputs 三处都要定位它,抽出来避免第三次重写
+// 同一段扫描。找不到 Format 行(理论上不该发生,[Events] 必有一条)时退回 eventIndex 本身。
+const findAssEventsFormatLineIndex = (lines: string[], eventIndex: number): number => {
+  for (let i = eventIndex; i < lines.length; i++) {
+    if (/^format:/i.test(lines[i])) return i;
+  }
+  return eventIndex;
+};
+
+/**
+ * splitAssByStyles 的逆操作:把若干份(各自完整、共享同一份 [Script Info]/
+ * [V4+ Styles] 头部的)ASS 字符串的 [Events] 正文拼回一份文件里 —— 用于"分别
+ * 翻译各语言轨道后合并回一份新的双语 ASS"。取 parts[0] 的头部(含 Format 行),
+ * 依次追加每一份的 Dialogue/Comment 行,不做时间排序:ASS 播放器按每条 Dialogue
+ * 自己的 Start/End 渲染,与它们在文件里的物理顺序无关,直接拼接即可。
+ * 空数组返回空串;单个空 [Events](找不到 [Events] 头)的份原样返回,不參与合并。
+ */
+export const mergeAssOutputs = (parts: string[]): string => {
+  if (parts.length === 0) return "";
+
+  const firstLines = parts[0].split(/\r\n|\r|\n/);
+  const firstEventIndex = firstLines.findIndex((l) => /^\[events\]$/i.test(l.trim()));
+  if (firstEventIndex === -1) return parts[0];
+
+  const header = firstLines.slice(0, findAssEventsFormatLineIndex(firstLines, firstEventIndex) + 1);
+
+  const eventBodies: string[] = [];
+  for (const part of parts) {
+    const lines = part.split(/\r\n|\r|\n/);
+    const eventIndex = lines.findIndex((l) => /^\[events\]$/i.test(l.trim()));
+    if (eventIndex === -1) continue;
+    eventBodies.push(...lines.slice(findAssEventsFormatLineIndex(lines, eventIndex) + 1));
+  }
+
+  return [...header, ...eventBodies].join("\n");
+};
+
+/**
  * 从 index 位置向上扫描 lines,找最近的 VTT/SRT 时间码行的【行号】。
  * 返回行号而非文本:双语聚合用它做 Map key —— 两个不同 cue 的时间码文本
  * 可能逐字节相同(叠放双说话人字幕、机器生成的占位时间码),按文本 key 会把

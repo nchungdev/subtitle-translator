@@ -2,7 +2,7 @@
 
 import type { CSSProperties } from "react";
 import { Button, ConfigProvider, Progress, Typography, theme } from "antd";
-import { CloseOutlined } from "@ant-design/icons";
+import { CloseOutlined, DownloadOutlined } from "@ant-design/icons";
 import { useTranslations } from "next-intl";
 
 const { Text } = Typography;
@@ -44,6 +44,10 @@ interface TranslationProgressStripProps {
    * 就是在陈述一件没发生的事,而失败面板此时又是空的(没有解释、没有重试入口)。
    */
   lineFailures?: boolean;
+  /** Custom headline for multi-step progress */
+  customHeadline?: string;
+  /** Download completed or partial translation output */
+  onDownload?: () => void;
 }
 
 /**
@@ -63,7 +67,7 @@ interface TranslationProgressStripProps {
  * 一闪而过的 toast 里说过一次,界面上不留痕,用户没有理由相信「再点一次不会
  * 从头再来」。done / stopped 都保持到用户点 ✕(onDismiss 复位进度即关闭)。
  */
-const TranslationProgressStrip = ({ isTranslating, percent, onCancel, onDismiss, resumable = true, multiLanguageMode = false, targetLanguageCount = 0, currentCount, totalCount, failed = false, lineFailures = false }: TranslationProgressStripProps) => {
+const TranslationProgressStrip = ({ isTranslating, percent, onCancel, onDismiss, resumable = true, multiLanguageMode = false, targetLanguageCount = 0, currentCount, totalCount, failed = false, lineFailures = false, customHeadline, onDownload }: TranslationProgressStripProps) => {
   const t = useTranslations("common");
   const { token } = theme.useToken();
 
@@ -80,7 +84,7 @@ const TranslationProgressStrip = ({ isTranslating, percent, onCancel, onDismiss,
   const hasCountInfo = typeof currentCount === "number" && typeof totalCount === "number" && totalCount > 0;
   const accent = doneWithFailures || stopped ? token.colorWarning : done ? token.colorSuccess : token.colorPrimary;
   const marker = doneWithFailures ? "INCOMPLETE" : done ? "DONE" : stopped ? "STOPPED" : "IN PROGRESS";
-  const headline = doneWithFailures ? (lineFailures ? t("translateDonePartial") : t("translateDoneIncomplete")) : done ? t("translateDone") : stopped ? t("translationStopped") : t("translating");
+  const headline = customHeadline || (doneWithFailures ? (lineFailures ? t("translateDonePartial") : t("translateDoneIncomplete")) : done ? t("translateDone") : stopped ? t("translationStopped") : t("translating"));
   // 副文案分两种承诺,都只在缓存开着时说 —— 缓存关掉就没有断点,别撒谎。
   // 运行中:先给出取消的底气;停下后:告诉他怎么续。
   const subline = !resumable ? null : stopped ? t("resumeFromCache") : !done ? t("cancelKeepsProgress") : null;
@@ -156,15 +160,22 @@ const TranslationProgressStrip = ({ isTranslating, percent, onCancel, onDismiss,
         {/* 取消【不是】危险动作 —— 已译内容全在缓存里,再点一次就续上。用 danger
             红会让它读成「放弃/销毁」,与这条 strip 想传达的意思正好相反。
             autoInsertSpace:false 挡掉 antd 给两字中文按钮插的那个空格(「取 消」)。*/}
-        {isTranslating
-          ? onCancel && (
-              <ConfigProvider button={{ autoInsertSpace: false }}>
-                <Button size="small" onClick={onCancel} style={{ flexShrink: 0 }}>
-                  {t("cancel")}
-                </Button>
-              </ConfigProvider>
-            )
-          : onDismiss && <Button size="small" type="text" icon={<CloseOutlined />} onClick={onDismiss} aria-label={t("dismiss")} style={{ flexShrink: 0 }} />}
+        <div className="flex items-center" style={{ gap: 8, flexShrink: 0 }}>
+          {onDownload && (
+            <Button size="small" type="primary" icon={<DownloadOutlined />} onClick={onDownload}>
+              {t("download")}
+            </Button>
+          )}
+          {isTranslating
+            ? onCancel && (
+                <ConfigProvider button={{ autoInsertSpace: false }}>
+                  <Button size="small" onClick={onCancel}>
+                    {t("cancel")}
+                  </Button>
+                </ConfigProvider>
+              )
+            : onDismiss && <Button size="small" type="text" icon={<CloseOutlined />} onClick={onDismiss} aria-label={t("dismiss")} />}
+        </div>
       </div>
     </div>
   );

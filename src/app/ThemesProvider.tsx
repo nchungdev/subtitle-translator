@@ -2,15 +2,41 @@
 
 import { ThemeProvider as NextThemesProvider, useTheme } from "next-themes";
 import { ConfigProvider, App, theme, Layout } from "antd";
-import { ReactNode, useSyncExternalStore } from "react";
+import React, { ReactNode, useSyncExternalStore } from "react";
 import { useLocale } from "next-intl";
 import { getLangDir } from "rtl-detect";
 
+function ClientSafeNextThemesProvider(props: React.ComponentProps<typeof NextThemesProvider>) {
+  const mounted = useSyncExternalStore(
+    () => () => {},
+    () => true,
+    () => false
+  );
+
+  if (mounted && typeof window !== "undefined") {
+    const origCreateElement = React.createElement;
+    try {
+      React.createElement = function (type: unknown, ...args: unknown[]) {
+        if (type === "script") {
+          return null as unknown as ReturnType<typeof origCreateElement>;
+        }
+        return (origCreateElement as (...fnArgs: unknown[]) => ReturnType<typeof origCreateElement>)(type, ...args);
+      } as typeof React.createElement;
+
+      return <NextThemesProvider {...props} />;
+    } finally {
+      React.createElement = origCreateElement;
+    }
+  }
+
+  return <NextThemesProvider {...props} />;
+}
+
 export default function ThemesProvider({ children }: { children: ReactNode }) {
   return (
-    <NextThemesProvider attribute="class" defaultTheme="dark" enableSystem={false}>
+    <ClientSafeNextThemesProvider attribute="class" defaultTheme="dark" enableSystem={false}>
       <AntdConfigProvider>{children}</AntdConfigProvider>
-    </NextThemesProvider>
+    </ClientSafeNextThemesProvider>
   );
 }
 

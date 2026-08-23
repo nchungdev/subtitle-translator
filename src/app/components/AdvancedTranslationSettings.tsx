@@ -1,9 +1,13 @@
 "use client";
 
-import React from "react";
-import { ConfigProvider, Flex, Input, InputNumber, Row, Col, Tooltip, Switch, Form, Typography } from "antd";
+import React, { useState } from "react";
+import { AutoComplete, ConfigProvider, Flex, Input, InputNumber, Row, Col, Tooltip, Switch, Form, Typography, theme, Select, Tag, Space, Button, App } from "antd";
+import { ApiOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { useTranslations } from "next-intl";
 import Section from "@/app/components/styled/Section";
+import { getProviderModels } from "@/app/lib/translation";
+import { extractCharacterGraphFromText } from "@/app/lib/translation/characterGraphService";
+import { describeError } from "@/app/utils";
 
 const { Text } = Typography;
 
@@ -25,10 +29,18 @@ interface AdvancedTranslationSettingsProps {
   // Single File Mode
   singleFileMode?: boolean;
   setSingleFileMode?: (value: boolean) => void;
+  // Character Graph (Independent per-provider configs)
+  characterGraphEnabled?: boolean;
+  setCharacterGraphEnabled?: (value: boolean) => void;
+  characterGraphProvider?: string;
+  setCharacterGraphProvider?: (value: string) => void;
+  getCharacterGraphConfig?: (provider?: string) => { apiKey?: string; model?: string; url?: string };
+  updateCharacterGraphConfig?: (provider: string, config: { apiKey?: string; model?: string; url?: string }) => void;
+  setApiSettingsOpen?: (open: boolean) => void;
+  translationMethod?: string;
+  activeModel?: string;
   // Optional: custom children for component-specific settings (rendered before the common settings)
   children?: React.ReactNode;
-  // 翻译进行中整块禁用(含调用方塞进来的 children)。整条翻译链跑在点击那一刻的
-  // 闭包快照上,运行中改这些只会"看起来生效了"——想改,先取消(缓存即断点)。
   disabled?: boolean;
 }
 
@@ -43,17 +55,63 @@ const AdvancedTranslationSettings: React.FC<AdvancedTranslationSettingsProps> = 
   setRequestTimeoutSec,
   useCache,
   setUseCache,
+  characterGraphEnabled,
+  setCharacterGraphEnabled,
+  characterGraphProvider = "gemini",
+  setCharacterGraphProvider,
+  getCharacterGraphConfig,
+  updateCharacterGraphConfig,
+  setApiSettingsOpen,
+  translationMethod,
+  activeModel,
   children,
   disabled = false,
   singleFileMode,
   setSingleFileMode,
 }) => {
   const t = useTranslations("common");
+  const { token } = theme.useToken();
+
+  const activeGraphConfig = getCharacterGraphConfig ? getCharacterGraphConfig(characterGraphProvider) : { apiKey: "", model: "" };
+  const providerModels = (getProviderModels(characterGraphProvider) as Array<{ label: string; value: string }>).map((m) => ({
+    label: m.label !== m.value ? `${m.label} (${m.value})` : m.value,
+    value: m.value,
+  }));
+
+  const [sessionStatus, setSessionStatus] = useState<"idle" | "testing" | "connected" | "failed">("idle");
+  const { message } = App.useApp();
+
+  const handleTestConnection = async () => {
+    setSessionStatus("testing");
+    try {
+      const graph = await extractCharacterGraphFromText(
+        "1\n00:00:01,000 --> 00:00:03,000\nHello, how are you?",
+        {
+          sourceFileName: "test.ass",
+          provider: characterGraphProvider,
+          apiKey: activeGraphConfig.apiKey,
+          model: activeGraphConfig.model,
+          endpoint: activeGraphConfig.url,
+        }
+      );
+      setSessionStatus("connected");
+      message.success(t("apiStatusConnected", { defaultValue: "Kết nối API Đồ thị xưng hô thành công!" }));
+    } catch (err) {
+      setSessionStatus("failed");
+      console.warn("[CharacterGraph] Test connection failed:", err);
+      message.error(describeError(err, t));
+    }
+  };
+
+  const labelCharacterGraph = t.has("characterGraphEnabled")
+    ? t("characterGraphEnabled")
+    : "Tự động phân tích & giữ nhất quán xưng hô (Character Graph)";
+
+  const tooltipCharacterGraph = t.has("characterGraphEnabledTooltip")
+    ? t("characterGraphEnabledTooltip")
+    : "Sử dụng AI phân tích toàn bộ file trước khi dịch để trích xuất cặp xưng hô (anh/em, chị/em, tớ/cậu...), đảm bảo đại từ xưng hô nhất quán 100% xuyên suốt phim.";
 
   return (
-    // ConfigProvider componentDisabled:一点锁全(Switch/InputNumber/Input 与
-    // children 里的控件都消费 DisabledContext),不用逐控件写 disabled。
-    // ⚠ 若日后往里放 Segmented:antd 6 的 Segmented 不读 DisabledContext,得显式传。
     <ConfigProvider componentDisabled={disabled}>
     <Flex vertical gap="middle">
       {/* 1. General Switches */}
@@ -69,6 +127,122 @@ const AdvancedTranslationSettings: React.FC<AdvancedTranslationSettingsProps> = 
             </Flex>
           )}
           <Flex component="label" className="cursor-pointer" justify="space-between" align="center">
+            <Tooltip title={tooltipCharacterGraph}>
+              <Text>{labelCharacterGraph}</Text>
+            </Tooltip>
+            <Switch size="small" checked={characterGraphEnabled} onChange={setCharacterGraphEnabled} aria-label={labelCharacterGraph} />
+          </Flex>
+          {characterGraphEnabled && (
+            <section
+              style={{
+                background:
+                  sessionStatus === "connected"
+                    ? token.colorSuccessBg
+                    : sessionStatus === "failed"
+                    ? token.colorErrorBg
+                    : token.colorFillAlter,
+                border: `1px solid ${
+                  sessionStatus === "connected"
+                    ? token.colorSuccessBorder
+                    : sessionStatus === "failed"
+                    ? token.colorErrorBorder
+                    : token.colorBorderSecondary
+                }`,
+                borderRadius: token.borderRadiusLG,
+                padding: token.paddingSM,
+                marginTop: token.marginXS,
+                marginBottom: token.marginXS,
+              }}>
+              <Flex justify="space-between" align="center" style={{ marginBottom: token.marginXS }}>
+                <Space size="small">
+                  <ApiOutlined />
+                  <Typography.Text strong>API Đồ thị xưng hô</Typography.Text>
+                  <Tag
+                    color={
+                      sessionStatus === "connected"
+                        ? "success"
+                        : sessionStatus === "failed"
+                        ? "error"
+                        : activeGraphConfig.apiKey
+                        ? "cyan"
+                        : "warning"
+                    }>
+                    {sessionStatus === "connected"
+                      ? "Đã kết nối"
+                      : sessionStatus === "failed"
+                      ? "Lỗi kết nối"
+                      : activeGraphConfig.apiKey
+                      ? "Đã cấu hình"
+                      : "Cần cấu hình"}
+                  </Tag>
+                </Space>
+              </Flex>
+
+              <Space.Compact className="w-full">
+                {setCharacterGraphProvider && (
+                  <Select
+                    showSearch
+                    value={characterGraphProvider}
+                    onChange={setCharacterGraphProvider}
+                    style={{ flex: 1, minWidth: 120 }}
+                    options={[
+                      { label: "Google Gemini", value: "gemini" },
+                      { label: "OpenAI", value: "openai" },
+                      { label: "Anthropic Claude", value: "claude" },
+                      { label: "DeepSeek AI", value: "deepseek" },
+                      { label: "OpenCode Zen", value: "opencode" },
+                      { label: "LM Studio / Ollama", value: "lmstudio" },
+                    ]}
+                  />
+                )}
+                <Tooltip title="API Key cho mô hình Đồ thị xưng hô">
+                  <Input.Password
+                    autoComplete="off"
+                    placeholder="API Key"
+                    value={activeGraphConfig.apiKey || ""}
+                    onChange={(e) => updateCharacterGraphConfig && updateCharacterGraphConfig(characterGraphProvider, { apiKey: e.target.value })}
+                    style={{ flex: 1, minWidth: 120 }}
+                  />
+                </Tooltip>
+              </Space.Compact>
+
+              <Space.Compact className="w-full" style={{ marginTop: 8 }}>
+                <AutoComplete
+                  size="small"
+                  options={providerModels}
+                  placeholder="Mô hình ID (VD: gemini-2.5-flash)"
+                  value={activeGraphConfig.model || ""}
+                  onChange={(val) => updateCharacterGraphConfig && updateCharacterGraphConfig(characterGraphProvider, { model: val })}
+                  style={{ flex: 1 }}
+                  filterOption={(inputValue, option) =>
+                    (option?.value ?? "").toLowerCase().includes(inputValue.toLowerCase()) ||
+                    (option?.label ?? "").toLowerCase().includes(inputValue.toLowerCase())
+                  }
+                />
+              </Space.Compact>
+
+              <Flex justify="space-between" align="center" wrap gap={4} style={{ marginTop: token.marginXS }}>
+                <Button
+                  size="small"
+                  icon={<ThunderboltOutlined />}
+                  onClick={handleTestConnection}
+                  loading={sessionStatus === "testing"}
+                  disabled={disabled}>
+                  {t("testConnection", { defaultValue: "Kiểm tra kết nối" })}
+                </Button>
+                {setApiSettingsOpen && (
+                  <Button
+                    type="link"
+                    size="small"
+                    style={{ padding: 0 }}
+                    onClick={() => setApiSettingsOpen(true)}>
+                    {t("moreProviderSettings", { defaultValue: "Thêm cài đặt Provider →" })}
+                  </Button>
+                )}
+              </Flex>
+            </section>
+          )}
+          <Flex justify="space-between" align="center">
             <Tooltip title={t("useCacheTooltip")}>
               <Text>{t("useCache")}</Text>
             </Tooltip>

@@ -89,6 +89,7 @@ export type RuntimeGlobals = {
   retryCount: number | undefined;
   requestTimeoutSec: number | undefined;
   relayBase: string | undefined;
+  characterGraphPromptBlock?: string | undefined;
 };
 
 export interface TranslationConfig {
@@ -124,4 +125,5 @@ export interface TranslationConfig {
    */
   thinkingEffort?: Record<string, ThinkingDirective>;
   domains?: string;
+  characterGraphPromptBlock?: string;
 }

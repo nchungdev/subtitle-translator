@@ -35,6 +35,7 @@ import { DEFAULT_RETRY_COUNT, DEFAULT_RETRY_TIMEOUT, isRetryableError, isDefinit
 import { type TranslationSettings } from "@/app/lib/translation/settingsSchema";
 import { describeError, isNetworkError } from "@/app/utils/errorUtils";
 import { useTranslations } from "next-intl";
+import { extractCharacterGraphFromText, buildCharacterGraphPromptBlock } from "@/app/lib/translation/characterGraphService";
 
 const DEFAULT_API = "gtxFreeAPI";
 
@@ -96,6 +97,43 @@ const useTranslationState = () => {
   // setting merged into runtimeConfig at translate time, which is what keeps
   // it under the run-snapshot rule (mid-run edits can't affect the live run).
   const [relayBase, setRelayBase] = useLocalStorage<string>("translation-relayBase", "");
+  const [characterGraphEnabled, setCharacterGraphEnabled] = useLocalStorage<boolean>("subtitle-translator-characterGraphEnabled", false);
+  const [characterGraphProvider, setCharacterGraphProvider] = useLocalStorage<string>("subtitle-translator-characterGraphProvider", "gemini");
+  const [characterGraphConfigs, setCharacterGraphConfigs] = useLocalStorage<TranslationConfigs>("subtitle-translator-characterGraphConfigs", defaultConfigs as TranslationConfigs);
+
+  const getCharacterGraphConfig = (provider: string = characterGraphProvider): TranslationConfig => {
+    const specific = (characterGraphConfigs as Record<string, TranslationConfig>)[provider];
+    if (specific && (specific.apiKey || specific.model || specific.url)) {
+      return specific;
+    }
+    const main = (translationConfigs as Record<string, TranslationConfig>)[provider];
+    if (main && (main.apiKey || main.model || main.url)) {
+      if (main.apiKey && main.apiKey.trim().endsWith(":fx") && provider !== "deepl") {
+        // Do not use DeepL key for LLMs
+      } else {
+        return main;
+      }
+    }
+    return (defaultConfigs as Record<string, TranslationConfig>)[provider] || { apiKey: "", model: "" };
+  };
+
+  const updateCharacterGraphConfig = (provider: string, newConfig: Partial<TranslationConfig>) => {
+    setCharacterGraphConfigs((prev) => {
+      const prevRecord = prev as Record<string, TranslationConfig>;
+      const mainRecord = translationConfigs as Record<string, TranslationConfig>;
+      const defRecord = defaultConfigs as Record<string, TranslationConfig>;
+      const current = prevRecord[provider] || mainRecord[provider] || defRecord[provider] || { apiKey: "", model: "" };
+      return {
+        ...prev,
+        [provider]: {
+          ...current,
+          ...newConfig,
+        },
+      };
+    });
+  };
+  const [characterGraphPromptBlock, setCharacterGraphPromptBlock] = useState<string | undefined>(undefined);
+  const [translationPhase, setTranslationPhase] = useState<"idle" | "graph" | "translating" | "done">("idle");
   const [translatedText, setTranslatedText] = useState<string>("");
   // Line-level soft-failure: lines still failing after retries exhaust.
   // UI shows Alert with retry button; cache hits skip re-translation.
@@ -542,6 +580,32 @@ const useTranslationState = () => {
   // (translateSingleWithGlossary)把并发/节流/进度/失败收集还给调用方,
   // 调用方长成第二个 pipeline 并真的漂移过(delayTime),已随 JSONTranslator
   // 迁移一并删除。别再为"就翻一行"开新口子。
+  const ensureCharacterGraphPromptBlock = async (sourceText: string, fileName?: string) => {
+    if (!characterGraphEnabled) return undefined;
+    if (characterGraphPromptBlock) return characterGraphPromptBlock;
+
+    setTranslationPhase("graph");
+    const targetProvider = characterGraphProvider || "gemini";
+    const graphConfig = getCharacterGraphConfig(targetProvider);
+
+    const graph = await extractCharacterGraphFromText(sourceText, {
+      sourceFileName: fileName || "subtitle.ass",
+      provider: targetProvider,
+      apiKey: graphConfig.apiKey,
+      model: graphConfig.model,
+      endpoint: graphConfig.url,
+    });
+
+    if (graph) {
+      const block = buildCharacterGraphPromptBlock(graph);
+      setCharacterGraphPromptBlock(block);
+      setTranslationPhase("translating");
+      return block;
+    }
+    setTranslationPhase("translating");
+    return undefined;
+  };
+
   const translateBatch = async (
     contentLines: string[],
     translationMethodArg: string,
@@ -550,45 +614,41 @@ const useTranslationState = () => {
     totalFiles: number = 1,
     documentType?: "subtitle" | "markdown" | "generic",
     meta?: TranslateBatchMeta,
-    // 翻译单元互相独立、必须逐单元往返(JSON 值)时置 true。它压住【两条】批处理
-    // 路径,不止一条:组装线剥 chunkSize 挡住 chunk,引擎的 `!config.independent`
-    // 挡住 LLM 上下文 marker 批 —— 后者的分支排在 chunkSize 之前,只剥 chunkSize
-    // 对 LLM provider 完全无效(上线过的那个 bug 就是这个心智模型的产物)。
-    // chunk 的 join/split 对齐对独立单元是静默数据损坏。CLI 壳同一开关,
-    // 细节见 PipelineRuntimeConfig.independent。
     independent: boolean = false,
+    sourceLanguageOverride?: string,
   ) => {
     const config = getSelectedConfig();
 
     try {
       if (!contentLines.length) return [];
 
-      // Provider 已卸载 / 用户已取消:不再开启新 run(多语言/多文件循环每轮都会
-      // 走到这里【新建】controller,单靠 abort 旧 controller 拦不住后续轮次 ——
-      // 这正是 cancelRequestedRef 存在的理由)。这两种是用户/环境主动终止,
-      // 工具层静默 continue 是对的。
       if (disposedRef.current || cancelRequestedRef.current) throw new Error("Translation aborted");
-      // 本轮已确认凭据失效:抛【原始 auth 错误】,不是级联标记 —— 理由见
-      // authFailedRef 的注释(级联标记那条路径连带跳过了失败记账)。
       if (authFailedRef.current) throw authFailedRef.current;
 
-      // Initialize new abort controller for this translation batch. The
-      // pipeline chains its own run controller off this signal — auth errors
-      // cascade inside the pipeline; requestCancel aborts this one.
       const runController = new AbortController();
       abortControllerRef.current = runController;
 
-      // systemPrompt stays the BASE prompt — the pipeline appends the
-      // per-request glossary block (filtered to the terms each text contains).
-      // 组装线与 CLI 共用 buildRuntimeConfig;globals 的键由 RuntimeGlobals
-      // 强制列全 —— 新增全局旋钮时这里不改就编译不过。
+      let cgBlock = characterGraphPromptBlock;
+      if (characterGraphEnabled && !cgBlock && contentLines.length > 0) {
+        cgBlock = await ensureCharacterGraphPromptBlock(contentLines.join("\n"), meta?.fileName);
+      } else {
+        setTranslationPhase("translating");
+      }
+
       const runtimeConfig: TranslationRuntimeConfig = buildRuntimeConfig({
         translationMethod: translationMethodArg,
         targetLanguage: currentTargetLang,
-        sourceLanguage,
+        sourceLanguage: sourceLanguageOverride ?? sourceLanguage,
         useCache,
         config,
-        globals: { systemPrompt: effectiveSystemPrompt, userPrompt: effectiveUserPrompt, retryCount, requestTimeoutSec, relayBase },
+        globals: {
+          systemPrompt: effectiveSystemPrompt,
+          userPrompt: effectiveUserPrompt,
+          retryCount,
+          requestTimeoutSec,
+          relayBase,
+          characterGraphPromptBlock: cgBlock,
+        },
         independent,
       });
 
@@ -894,6 +954,15 @@ const useTranslationState = () => {
     setRequestTimeoutSec,
     relayBase,
     setRelayBase,
+    characterGraphEnabled,
+    setCharacterGraphEnabled,
+    characterGraphProvider,
+    setCharacterGraphProvider,
+    getCharacterGraphConfig,
+    updateCharacterGraphConfig,
+    characterGraphPromptBlock,
+    setCharacterGraphPromptBlock,
+    translationPhase,
     validate,
     llmPresets,
     activeLlmPresetId,
