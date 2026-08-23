@@ -155,6 +155,7 @@
     "noMatches": "No matching tools",
     "clearAll": "Clear all",
     "cancel": "Cancel",
+    "download": "Download",
     "apply": "Apply",
     "batchEditMultiLangTooltip": "Quickly configure multi-language translation targets",
     "multiLangSettingsTitle": "Multi-language settings",

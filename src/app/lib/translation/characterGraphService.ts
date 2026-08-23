@@ -6,7 +6,7 @@ import { callClaude } from "../../../../scripts/characterGraph/claudeClient";
 import { callOpenAICompat, KNOWN_PROVIDER_ENDPOINTS } from "../../../../scripts/characterGraph/openAICompatClient";
 import type { CharacterGraph } from "../../../../scripts/characterGraph/schema";
 import { parseAssDialogueStyles } from "./formats/subtitle";
-import { resolveRelayableEndpoint } from "./services/shared";
+import { resolveWireEndpoint } from "./registry";
 
 export interface ExtractCharacterGraphOptions {
   sourceFileName: string;
@@ -70,10 +70,9 @@ export const extractCharacterGraphFromText = async (
     } else {
       const known = KNOWN_PROVIDER_ENDPOINTS[providerKey];
       const directEndpoint = known?.endpoint || "https://api.openai.com/v1/chat/completions";
-      const endpoint = resolveRelayableEndpoint(providerKey, {
-        customUrl: options.endpoint,
+      const endpoint = resolveWireEndpoint(providerKey, {
+        url: options.endpoint || directEndpoint,
         useRelay: providerKey === "opencode" || providerKey === "openrouter",
-        direct: directEndpoint,
       });
 
       const apiKey = options.apiKey || process.env.OPENAI_API_KEY || "";

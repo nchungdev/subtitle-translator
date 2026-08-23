@@ -144,6 +144,7 @@
     "noMatches": "Aucun outil correspondant",
     "clearAll": "Tout effacer",
     "cancel": "Annuler",
+    "download": "Télécharger",
     "apply": "Appliquer",
     "batchEditMultiLangTooltip": "Configurer rapidement les cibles de traduction multilingue",
     "multiLangSettingsTitle": "Paramètres multilingues",
