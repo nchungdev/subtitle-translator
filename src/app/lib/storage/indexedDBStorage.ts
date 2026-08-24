@@ -100,6 +100,26 @@ export const translationCache = {
     }
   },
 
+  async getFileCache24h(hashKey: string): Promise<string | null> {
+    const raw = await this.get(`file24h:${hashKey}`);
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw);
+      const TTL_24H = 24 * 60 * 60 * 1000;
+      if (Date.now() - parsed.timestamp < TTL_24H && parsed.value) {
+        return parsed.value;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  },
+
+  async setFileCache24h(hashKey: string, value: string): Promise<void> {
+    const payload = JSON.stringify({ value, timestamp: Date.now() });
+    await this.set(`file24h:${hashKey}`, payload);
+  },
+
   async count(): Promise<number> {
     try {
       const db = await getDB();
@@ -109,3 +129,30 @@ export const translationCache = {
     }
   },
 };
+
+export async function computeFileHash(
+  content: string,
+  targetLang: string,
+  provider: string,
+  model: string
+): Promise<string> {
+  const payload = `${targetLang}:${provider}:${model}:${content}`;
+  if (typeof window !== "undefined" && window.crypto && window.crypto.subtle) {
+    try {
+      const encoder = new TextEncoder();
+      const data = encoder.encode(payload);
+      const hashBuffer = await window.crypto.subtle.digest("SHA-256", data);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+    } catch {
+      // Fallback
+    }
+  }
+  let hash = 0;
+  for (let i = 0; i < payload.length; i++) {
+    const char = payload.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash |= 0;
+  }
+  return `filehash-${Math.abs(hash)}`;
+}

@@ -5,9 +5,10 @@ import { AutoComplete, ConfigProvider, Flex, Input, InputNumber, Row, Col, Toolt
 import { ApiOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { useTranslations } from "next-intl";
 import Section from "@/app/components/styled/Section";
-import { getProviderModels } from "@/app/lib/translation";
+import { getProviderModels, GENRE_STYLE_OPTIONS } from "@/app/lib/translation";
 import { extractCharacterGraphFromText } from "@/app/lib/translation/characterGraphService";
 import { describeError } from "@/app/utils";
+import { useTranslationContext } from "@/app/components/TranslationContext";
 
 const { Text } = Typography;
 
@@ -72,9 +73,50 @@ const AdvancedTranslationSettings: React.FC<AdvancedTranslationSettingsProps> = 
   const t = useTranslations("common");
   const { token } = theme.useToken();
 
+  const getModelBadges = (value: string) => {
+    const v = value.toLowerCase();
+    if (v.includes("3.7-flash")) {
+      return { cost: "Cực rẻ / Free", quality: "★★★★★", isRecommended: true, badgeText: "Ngon nhất", note: "👑 Thế hệ mới nhất" };
+    }
+    if (v.includes("2.5-flash")) {
+      return { cost: "Cực rẻ / Free", quality: "★★★★☆", isRecommended: false, note: "⚡ Rất mượt • Phổ biến" };
+    }
+    if (v.includes("3.5-flash-lite")) {
+      return { cost: "Siêu rẻ / Free", quality: "★★★☆☆", isRecommended: false, note: "🚀 Tốc độ cao" };
+    }
+    if (v.includes("3.5-flash") || v.includes("1.5-flash")) {
+      return { cost: "Rẻ / Free", quality: "★★★★☆", isRecommended: false, note: "⚡ Cân bằng" };
+    }
+    if (v.includes("3.1-pro") || v.includes("pro-preview") || v.includes("gemini-1.5-pro")) {
+      return { cost: "Trung bình", quality: "★★★★★", isRecommended: false, note: "🧠 Suy luận cao cấp" };
+    }
+    if (v.includes("deepseek-v4-flash") || v.includes("deepseek-chat")) {
+      return { cost: "Cực rẻ", quality: "★★★★★", isRecommended: true, badgeText: "Ngon nhất", note: "👑 Văn phong mượt" };
+    }
+    if (v.includes("deepseek-v4-pro") || v.includes("deepseek-reasoner")) {
+      return { cost: "Rẻ", quality: "★★★★★", isRecommended: false, note: "🧠 Suy luận sâu" };
+    }
+    if (v.includes("gpt-4o-mini") || v.includes("5.4-mini") || v.includes("5.6-luna")) {
+      return { cost: "Rẻ", quality: "★★★★☆", isRecommended: false, note: "⚡ Ổn định" };
+    }
+    if (v.includes("gpt-4o") || v.includes("gpt-5.6")) {
+      return { cost: "Giá cao", quality: "★★★★★", isRecommended: false, note: "💎 Cao cấp" };
+    }
+    if (v.includes("claude-sonnet")) {
+      return { cost: "Giá cao", quality: "★★★★★", isRecommended: true, badgeText: "Đỉnh nhất", note: "👑 Chất lượng cao nhất" };
+    }
+    if (v.includes("claude-haiku")) {
+      return { cost: "Rẻ", quality: "★★★★☆", isRecommended: false, note: "⚡ Tốc độ" };
+    }
+    if (v.includes("claude-opus")) {
+      return { cost: "Giá rất cao", quality: "★★★★★", isRecommended: false, note: "💎 Siêu cao cấp" };
+    }
+    return null;
+  };
+
   const activeGraphConfig = getCharacterGraphConfig ? getCharacterGraphConfig(characterGraphProvider) : { apiKey: "", model: "" };
   const providerModels = (getProviderModels(characterGraphProvider) as Array<{ label: string; value: string }>).map((m) => ({
-    label: m.label !== m.value ? `${m.label} (${m.value})` : m.value,
+    label: m.label || m.value,
     value: m.value,
   }));
 
@@ -111,6 +153,8 @@ const AdvancedTranslationSettings: React.FC<AdvancedTranslationSettingsProps> = 
     ? t("characterGraphEnabledTooltip")
     : "Sử dụng AI phân tích toàn bộ file trước khi dịch để trích xuất cặp xưng hô (anh/em, chị/em, tớ/cậu...), đảm bảo đại từ xưng hô nhất quán 100% xuyên suốt phim.";
 
+  const { genreStyle = "default", setGenreStyle, movieSynopsis = "", setMovieSynopsis } = useTranslationContext();
+
   return (
     <ConfigProvider componentDisabled={disabled}>
     <Flex vertical gap="middle">
@@ -125,122 +169,6 @@ const AdvancedTranslationSettings: React.FC<AdvancedTranslationSettingsProps> = 
               </Tooltip>
               <Switch size="small" checked={singleFileMode} onChange={setSingleFileMode} aria-label={t("singleFileMode")} />
             </Flex>
-          )}
-          <Flex component="label" className="cursor-pointer" justify="space-between" align="center">
-            <Tooltip title={tooltipCharacterGraph}>
-              <Text>{labelCharacterGraph}</Text>
-            </Tooltip>
-            <Switch size="small" checked={characterGraphEnabled} onChange={setCharacterGraphEnabled} aria-label={labelCharacterGraph} />
-          </Flex>
-          {characterGraphEnabled && (
-            <section
-              style={{
-                background:
-                  sessionStatus === "connected"
-                    ? token.colorSuccessBg
-                    : sessionStatus === "failed"
-                    ? token.colorErrorBg
-                    : token.colorFillAlter,
-                border: `1px solid ${
-                  sessionStatus === "connected"
-                    ? token.colorSuccessBorder
-                    : sessionStatus === "failed"
-                    ? token.colorErrorBorder
-                    : token.colorBorderSecondary
-                }`,
-                borderRadius: token.borderRadiusLG,
-                padding: token.paddingSM,
-                marginTop: token.marginXS,
-                marginBottom: token.marginXS,
-              }}>
-              <Flex justify="space-between" align="center" style={{ marginBottom: token.marginXS }}>
-                <Space size="small">
-                  <ApiOutlined />
-                  <Typography.Text strong>API Đồ thị xưng hô</Typography.Text>
-                  <Tag
-                    color={
-                      sessionStatus === "connected"
-                        ? "success"
-                        : sessionStatus === "failed"
-                        ? "error"
-                        : activeGraphConfig.apiKey
-                        ? "cyan"
-                        : "warning"
-                    }>
-                    {sessionStatus === "connected"
-                      ? "Đã kết nối"
-                      : sessionStatus === "failed"
-                      ? "Lỗi kết nối"
-                      : activeGraphConfig.apiKey
-                      ? "Đã cấu hình"
-                      : "Cần cấu hình"}
-                  </Tag>
-                </Space>
-              </Flex>
-
-              <Space.Compact className="w-full">
-                {setCharacterGraphProvider && (
-                  <Select
-                    showSearch
-                    value={characterGraphProvider}
-                    onChange={setCharacterGraphProvider}
-                    style={{ flex: 1, minWidth: 120 }}
-                    options={[
-                      { label: "Google Gemini", value: "gemini" },
-                      { label: "OpenAI", value: "openai" },
-                      { label: "Anthropic Claude", value: "claude" },
-                      { label: "DeepSeek AI", value: "deepseek" },
-                      { label: "OpenCode Zen", value: "opencode" },
-                      { label: "LM Studio / Ollama", value: "lmstudio" },
-                    ]}
-                  />
-                )}
-                <Tooltip title="API Key cho mô hình Đồ thị xưng hô">
-                  <Input.Password
-                    autoComplete="off"
-                    placeholder="API Key"
-                    value={activeGraphConfig.apiKey || ""}
-                    onChange={(e) => updateCharacterGraphConfig && updateCharacterGraphConfig(characterGraphProvider, { apiKey: e.target.value })}
-                    style={{ flex: 1, minWidth: 120 }}
-                  />
-                </Tooltip>
-              </Space.Compact>
-
-              <Space.Compact className="w-full" style={{ marginTop: 8 }}>
-                <AutoComplete
-                  size="small"
-                  options={providerModels}
-                  placeholder="Mô hình ID (VD: gemini-2.5-flash)"
-                  value={activeGraphConfig.model || ""}
-                  onChange={(val) => updateCharacterGraphConfig && updateCharacterGraphConfig(characterGraphProvider, { model: val })}
-                  style={{ flex: 1 }}
-                  filterOption={(inputValue, option) =>
-                    (option?.value ?? "").toLowerCase().includes(inputValue.toLowerCase()) ||
-                    (option?.label ?? "").toLowerCase().includes(inputValue.toLowerCase())
-                  }
-                />
-              </Space.Compact>
-
-              <Flex justify="space-between" align="center" wrap gap={4} style={{ marginTop: token.marginXS }}>
-                <Button
-                  size="small"
-                  icon={<ThunderboltOutlined />}
-                  onClick={handleTestConnection}
-                  loading={sessionStatus === "testing"}
-                  disabled={disabled}>
-                  {t("testConnection", { defaultValue: "Kiểm tra kết nối" })}
-                </Button>
-                {setApiSettingsOpen && (
-                  <Button
-                    type="link"
-                    size="small"
-                    style={{ padding: 0 }}
-                    onClick={() => setApiSettingsOpen(true)}>
-                    {t("moreProviderSettings", { defaultValue: "Thêm cài đặt Provider →" })}
-                  </Button>
-                )}
-              </Flex>
-            </section>
           )}
           <Flex justify="space-between" align="center">
             <Tooltip title={t("useCacheTooltip")}>

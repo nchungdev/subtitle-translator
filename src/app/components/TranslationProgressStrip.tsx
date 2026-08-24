@@ -84,7 +84,15 @@ const TranslationProgressStrip = ({ isTranslating, percent, onCancel, onDismiss,
   const hasCountInfo = typeof currentCount === "number" && typeof totalCount === "number" && totalCount > 0;
   const accent = doneWithFailures || stopped ? token.colorWarning : done ? token.colorSuccess : token.colorPrimary;
   const marker = doneWithFailures ? "INCOMPLETE" : done ? "DONE" : stopped ? "STOPPED" : "IN PROGRESS";
-  const headline = customHeadline || (doneWithFailures ? (lineFailures ? t("translateDonePartial") : t("translateDoneIncomplete")) : done ? t("translateDone") : stopped ? t("translationStopped") : t("translating"));
+  const defaultHeadline = doneWithFailures
+    ? (lineFailures ? t("translateDonePartial") : t("translateDoneIncomplete"))
+    : done
+    ? t("translateDone")
+    : stopped
+    ? t("translationStopped")
+    : t("translating");
+
+  const headline = done ? (customHeadline && customHeadline.includes("Hoàn tất") ? customHeadline : t("translateDone")) : (customHeadline || defaultHeadline);
   // 副文案分两种承诺,都只在缓存开着时说 —— 缓存关掉就没有断点,别撒谎。
   // 运行中:先给出取消的底气;停下后:告诉他怎么续。
   const subline = !resumable ? null : stopped ? t("resumeFromCache") : !done ? t("cancelKeepsProgress") : null;
@@ -157,15 +165,7 @@ const TranslationProgressStrip = ({ isTranslating, percent, onCancel, onDismiss,
             </Text>
           )}
         </span>
-        {/* 取消【不是】危险动作 —— 已译内容全在缓存里,再点一次就续上。用 danger
-            红会让它读成「放弃/销毁」,与这条 strip 想传达的意思正好相反。
-            autoInsertSpace:false 挡掉 antd 给两字中文按钮插的那个空格(「取 消」)。*/}
         <div className="flex items-center" style={{ gap: 8, flexShrink: 0 }}>
-          {onDownload && (
-            <Button size="small" type="primary" icon={<DownloadOutlined />} onClick={onDownload}>
-              {t("download")}
-            </Button>
-          )}
           {isTranslating
             ? onCancel && (
                 <ConfigProvider button={{ autoInsertSpace: false }}>

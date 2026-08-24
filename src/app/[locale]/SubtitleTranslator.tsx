@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useState, useMemo, useRef } from "react";
-import { Flex, Card, Button, Typography, Input, Upload, Form, Space, App, Tooltip, Segmented, Spin, Row, Col, Divider, Collapse, Alert, theme, Progress, Tag } from "antd";
+import React, { useState, useMemo, useRef, useEffect } from "react";
+import { Flex, Card, Button, Typography, Input, Upload, Form, Space, App, Tooltip, Segmented, Spin, Row, Col, Divider, Collapse, Alert, theme, Progress, Tag, Tabs, Switch, Select, AutoComplete, Checkbox, Popconfirm } from "antd";
 import {
   SettingOutlined,
   CopyOutlined,
@@ -24,16 +24,26 @@ import {
   ClockCircleOutlined,
   DownloadOutlined,
   ShareAltOutlined,
+  BookOutlined,
+  ApiOutlined,
+  FileZipOutlined,
+  PlayCircleOutlined,
+  StopOutlined,
+  DeleteOutlined,
+  SearchOutlined,
 } from "@ant-design/icons";
+import SubtitleReviewTab from "@/app/components/SubtitleReviewTab";
 import { useTranslations } from "next-intl";
 import JSZip from "jszip";
 import CharacterGraphModal from "@/app/components/CharacterGraphModal";
+import { MovieContextBuilder } from "@/app/components/MovieContextBuilder";
 import { useCopyToClipboard } from "@/app/hooks/useCopyToClipboard";
 import useFileUpload from "@/app/hooks/useFileUpload";
 import { useResetOnSourceChange } from "@/app/hooks/useResetOnSourceChange";
 import { useLocalStorage } from "@/app/hooks/useLocalStorage";
 import { useTextStats } from "@/app/hooks/useTextStats";
 import { useExportFilename } from "@/app/hooks/useExportFilename";
+import { computeFileMd5, getCachedFileByMd5, saveFileToDiskCache } from "@/app/lib/storage/fileDiskCache";
 
 import { splitTextIntoLines, downloadFile, applyRemoveCharsToLines, describeError, isAbortError, isCascadedAbort, isNetworkError, getFileTypePresetConfig } from "@/app/utils";
 import {
@@ -53,7 +63,7 @@ import {
   type AssStyleConfig,
   type AssStylePreset,
 } from "@/app/lib/translation/formats/subtitle";
-import { LLM_MODELS } from "@/app/lib/translation";
+import { LLM_MODELS, categorizedOptions, findMethodLabel, getProviderModels } from "@/app/lib/translation";
 import { transformSkippingSoftFilled } from "@/app/lib/translation/softFill";
 import { delay } from "@/app/lib/translation/retry";
 import BilingualTranslateModal, { type BackgroundTaskPayload } from "@/app/components/BilingualTranslateModal";
@@ -167,11 +177,6 @@ const BackgroundBatchProgressStrip = ({
           {title}
         </Text>
         <Space size="small">
-            <Button size="small" type="primary" icon={<DownloadOutlined />} onClick={handleDownloadAllCompleted}>
-              {doneItems.length > 1
-                ? `${tSubtitle.has("download") ? tSubtitle("download") : "Tải xuống"} (${doneItems.length})`
-                : tSubtitle.has("download") ? tSubtitle("download") : "Tải xuống"}
-            </Button>
           <Button
             size="small"
             type="text"
@@ -283,6 +288,8 @@ const SubtitleTranslator = () => {
     setTargetLanguages,
     useCache,
     setUseCache,
+    skipCachedFiles,
+    setSkipCachedFiles,
     characterGraphEnabled,
     setCharacterGraphEnabled,
     characterGraphProvider,
@@ -332,9 +339,13 @@ const SubtitleTranslator = () => {
   const { message } = App.useApp();
   const { token } = theme.useToken();
   const cardStyle: React.CSSProperties = { boxShadow: token.boxShadowTertiary };
+  const activeGraphConfig = getCharacterGraphConfig(characterGraphProvider);
 
   const sourceStats = useTextStats(sourceText);
   const resultStats = useTextStats(translatedText);
+
+  // Main UI Tab: 'context' | 'translate'
+  const [mainTabKey, setMainTabKey] = useState<string>("translate");
 
   // Export mode: 'translatedOnly' | 'bilingual' | 'both'
   const [exportMode, setExportMode] = useLocalStorage<"translatedOnly" | "bilingual" | "both">("subtitle-translator-exportMode", "translatedOnly");
@@ -398,6 +409,9 @@ const SubtitleTranslator = () => {
   const [characterGraphModalOpen, setCharacterGraphModalOpen] = useState(false);
   const [bilingualTask, setBilingualTask] = useState<BackgroundTaskPayload | null>(null);
   const [splitTask, setSplitTask] = useState<BackgroundTaskPayload | null>(null);
+  const [isContextProcessing, setIsContextProcessing] = useState(false);
+
+  const isAnyApiRunning = isTranslating || isFileProcessing || isContextProcessing || !!bilingualTask?.isProcessing || !!splitTask?.isProcessing;
   // 提取出的纯文本预览 — 只在 SubtitleTranslator 和 MDTranslator 用,
   // 不应该污染 TranslationProvider 的共享 state。
   const [extractedText, setExtractedText] = useState("");
@@ -429,6 +443,300 @@ const SubtitleTranslator = () => {
   // 标错语种(主 targetLanguage 跟 translatedText 内容不匹配)
   const [translatedTextLang, setTranslatedTextLang] = useState<string | null>(null);
   const { customFileName, setCustomFileName, generateFileName } = useExportFilename("subtitle-translator");
+
+  // Output items state for per-file results & bulk ZIP download
+  const [translationOutputs, setTranslationOutputs] = useState<Array<{ key: string; fileName: string; status: "done" | "error"; content?: string; errorMessage?: string }>>([]);
+
+  // Per-file Queue state & row controls
+  interface FileQueueItem {
+    id: string;
+    file: File;
+    fileName: string;
+    fileSize: number;
+    inputMd5?: string;
+    cachedFileName?: string;
+    status: "pending" | "translating" | "done" | "error";
+    progressPercent: number;
+    errorMessage?: string;
+  }
+
+  const [fileQueue, setFileQueue] = useState<FileQueueItem[]>([]);
+
+  // Selection state for per-row checkboxes
+  const [selectedFileIds, setSelectedFileIds] = useState<Set<string>>(new Set());
+
+  // Auto-sync selectedFileIds when fileQueue changes
+  useEffect(() => {
+    if (fileQueue.length > 0) {
+      setSelectedFileIds(new Set(fileQueue.map((f) => f.id)));
+    } else {
+      setSelectedFileIds(new Set());
+    }
+  }, [fileQueue.length]);
+
+  const isAllSelected = fileQueue.length > 0 && selectedFileIds.size === fileQueue.length;
+  const isIndeterminate = selectedFileIds.size > 0 && selectedFileIds.size < fileQueue.length;
+
+  const handleToggleSelectAll = (checked: boolean) => {
+    if (checked) {
+      setSelectedFileIds(new Set(fileQueue.map((f) => f.id)));
+    } else {
+      setSelectedFileIds(new Set());
+    }
+  };
+
+  const handleToggleSelectRow = (id: string, checked: boolean) => {
+    setSelectedFileIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  // Compute pending selected count (excludes done files when skipCachedFiles is checked)
+  const pendingSelectedItems = useMemo(() => {
+    return fileQueue.filter((item) => {
+      if (!selectedFileIds.has(item.id)) return false;
+      if (skipCachedFiles && item.status === "done") return false;
+      return true;
+    });
+  }, [fileQueue, selectedFileIds, skipCachedFiles]);
+
+  const pendingSelectedCount = pendingSelectedItems.length;
+
+  // Helper to handle downloading selected files (single direct download or bulk ZIP)
+  const handleDownloadSelectedOrAll = async () => {
+    const selectedQueueItems = fileQueue.filter((f) => selectedFileIds.has(f.id));
+    const activeLang = targetLanguages[0] || "vi";
+
+    const completedItems: Array<{ fileName: string; content: string }> = [];
+
+    for (const item of selectedQueueItems) {
+      // 1. Try finding in translationOutputs state
+      const out = translationOutputs.find((o) => o.fileName.includes(item.fileName) || item.fileName.includes(o.fileName));
+      if (out && out.content) {
+        completedItems.push({ fileName: out.fileName, content: out.content });
+        continue;
+      }
+
+      // 2. Try fetching from Disk Cache (IndexedDB) by inputMd5
+      if (item.inputMd5) {
+        const cached = await getCachedFileByMd5(item.inputMd5, activeLang);
+        if (cached && cached.content) {
+          completedItems.push({ fileName: cached.cachedFileName, content: cached.content });
+        }
+      }
+    }
+
+    if (completedItems.length === 0) {
+      message.warning("Chưa có tệp nào được chọn đã hoàn thành dịch.");
+      return;
+    }
+
+    if (completedItems.length === 1) {
+      void downloadFile(completedItems[0].content, completedItems[0].fileName);
+      message.success(`Đã tải xuống tệp: ${completedItems[0].fileName}`);
+      return;
+    }
+
+    try {
+      const zip = new JSZip();
+      for (const item of completedItems) {
+        zip.file(item.fileName, item.content);
+      }
+      const blob = await zip.generateAsync({ type: "blob" });
+      await downloadFile(blob, "subtitles_translated.zip");
+      message.success(`Đã nén & tải xuống ${completedItems.length} tệp phụ đề (.zip) thành công!`);
+    } catch (err) {
+      message.error("Lỗi khi tải hàng loạt (.zip): " + describeError(err, t));
+    }
+  };
+
+  // Remove a single file from queue and file list
+  const removeSingleFileFromQueue = (targetId: string) => {
+    const item = fileQueue.find((f) => f.id === targetId);
+    if (!item) return;
+
+    setFileQueue((prev) => prev.filter((f) => f.id !== targetId));
+    setSelectedFileIds((prev) => {
+      const next = new Set(prev);
+      next.delete(targetId);
+      return next;
+    });
+    setTranslationOutputs((prev) => prev.filter((o) => !o.fileName.includes(item.fileName)));
+    handleUploadRemove({ uid: targetId, name: item.fileName, size: item.fileSize } as any);
+  };
+
+  // Sync fileQueue with MD5 calculation & Disk Cache lookup (24h TTL, 1000 files cap)
+  useEffect(() => {
+    let cancelled = false;
+    if (multipleFiles.length > 0) {
+      const activeLang = targetLanguages[0] || "vi";
+
+      // Immediate basic sync
+      setFileQueue((prev) => {
+        return multipleFiles.map((file) => {
+          const id = file.name + "::" + file.size;
+          const existing = prev.find((p) => p.id === id);
+          if (existing) return existing;
+          return {
+            id,
+            file,
+            fileName: file.name,
+            fileSize: file.size,
+            status: "pending" as const,
+            progressPercent: 0,
+          };
+        });
+      });
+
+      // Async MD5 calculation & Disk Cache lookup for each file
+      for (const file of multipleFiles) {
+        const id = file.name + "::" + file.size;
+        readFile(file, async (text) => {
+          if (cancelled || !text) return;
+          const md5 = computeFileMd5(text);
+          const cached = await getCachedFileByMd5(md5, activeLang);
+
+          if (cached) {
+            setFileQueue((prev) =>
+              prev.map((item) =>
+                item.id === id
+                  ? {
+                      ...item,
+                      inputMd5: md5,
+                      cachedFileName: cached.cachedFileName,
+                      status: "done" as const,
+                      progressPercent: 100,
+                    }
+                  : item
+              )
+            );
+
+            // Populate translationOutputs so download & ZIP work
+            setTranslationOutputs((prev) => {
+              if (prev.some((p) => p.fileName === cached.cachedFileName || p.fileName.includes(file.name))) {
+                return prev;
+              }
+              return [
+                ...prev,
+                {
+                  key: cached.cachedFileName,
+                  fileName: cached.cachedFileName,
+                  status: "done" as const,
+                  content: cached.content,
+                },
+              ];
+            });
+
+            // Auto-check skipCachedFiles option!
+            setSkipCachedFiles(true);
+          } else {
+            setFileQueue((prev) =>
+              prev.map((item) => (item.id === id ? { ...item, inputMd5: md5 } : item))
+            );
+          }
+        });
+      }
+    } else {
+      setFileQueue([]);
+      setSkipCachedFiles(false);
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [multipleFiles, targetLanguages, setSkipCachedFiles]);
+
+  // Translate a single queue item
+  const translateSingleQueueItem = async (targetId: string) => {
+    const targetItem = fileQueue.find((f) => f.id === targetId);
+    if (!targetItem) return;
+
+    setFileQueue((prev) =>
+      prev.map((item) =>
+        item.id === targetId ? { ...item, status: "translating", progressPercent: 0, errorMessage: undefined } : item
+      )
+    );
+
+    try {
+      const text = await new Promise<string>((resolve, reject) => {
+        readFile(
+          targetItem.file,
+          (t) => resolve(t),
+          () => reject(new Error("Không thể đọc file"))
+        );
+      });
+
+      await performTranslation(text, targetItem.fileName, 0, 1);
+
+      setFileQueue((prev) =>
+        prev.map((item) =>
+          item.id === targetId ? { ...item, status: "done", progressPercent: 100 } : item
+        )
+      );
+    } catch (err: any) {
+      if (err.name === "AbortError" || isAbortError(err)) {
+        setFileQueue((prev) =>
+          prev.map((item) =>
+            item.id === targetId ? { ...item, status: "pending", progressPercent: 0 } : item
+          )
+        );
+        message.info(`Đã hủy dịch: ${targetItem.fileName}`);
+      } else {
+        setFileQueue((prev) =>
+          prev.map((item) =>
+            item.id === targetId ? { ...item, status: "error", errorMessage: describeError(err, t) } : item
+          )
+        );
+        message.error(`Lỗi dịch (${targetItem.fileName}): ${describeError(err, t)}`);
+      }
+    }
+  };
+
+  // Translate all items in queue (skips done files if skipCachedFiles is enabled)
+  const handleTranslateAllQueue = async () => {
+    if (fileQueue.length === 0) return;
+    setIsTranslating(true);
+    try {
+      for (const item of fileQueue) {
+        if (!selectedFileIds.has(item.id)) continue;
+        if (skipCachedFiles && item.status === "done") continue;
+        await translateSingleQueueItem(item.id);
+        await delay(500);
+      }
+    } finally {
+      setIsTranslating(false);
+    }
+  };
+
+  // Cancel single queue item
+  const cancelSingleQueueItem = (targetId: string) => {
+    requestCancel();
+    setFileQueue((prev) =>
+      prev.map((item) =>
+        item.id === targetId ? { ...item, status: "pending", progressPercent: 0 } : item
+      )
+    );
+  };
+
+  const handleDownloadZipAll = async () => {
+    if (translationOutputs.length === 0) return;
+    try {
+      const zip = new JSZip();
+      for (const item of translationOutputs) {
+        if (item.content) {
+          zip.file(item.fileName, item.content);
+        }
+      }
+      const blob = await zip.generateAsync({ type: "blob" });
+      await downloadFile(blob, "subtitles_translated.zip");
+      message.success(`Đã nén & tải xuống ${translationOutputs.length} tệp phụ đề (.zip) thành công!`);
+    } catch (err) {
+      message.error("Lỗi khi tải hàng loạt (.zip): " + describeError(err, t));
+    }
+  };
 
   // 源文本变化时只复位"源派生"的本地预览(extractedText)。译文结果及其元数据
   // (translatedText / translatedTextExt / needsBilingualSuffix / translatedTextLang)保留——
@@ -546,29 +854,22 @@ const SubtitleTranslator = () => {
 
         // Handle different export modes
         if (exportMode === "both") {
-          // Generate and download both translated-only and bilingual versions
+          // Generate both translated-only and bilingual versions
           const translatedOnlySubtitle = generateSubtitle(false, translatedLines, currentTargetLang, softFilled);
           const bilingualSubtitle = generateSubtitle(true, translatedLines, currentTargetLang, softFilled);
           const translatedOnlyExt = getOutputFileExtension(fileType, false, bilingualFormat, sourceExt);
-          // 原生 ASS 重新排版产出 v4.00+,即使源是 .ssa 也回写 .ass(仅双语版被重排)。
           const bilingualExt = fileType === "ass" && assNativeRebuild ? "ass" : getOutputFileExtension(fileType, true, bilingualFormat, sourceExt);
 
           const translatedOnlyFileName = generateFileName(fileName, langLabel, translatedOnlyExt, multiLanguageMode);
-          // bilingual 文件在扩展名前插 _bilingual 后缀,避免跟 translatedOnly 文件同名冲突
-          // (ASS/LRC 源、SRT+format=srt 三种场景下两个 ext 相同,不区分会被浏览器覆盖下载)
           const bilingualFileName = appendBilingualSuffix(generateFileName(fileName, langLabel, bilingualExt, multiLanguageMode));
 
-          await downloadFile(translatedOnlySubtitle, translatedOnlyFileName);
-          await downloadFile(bilingualSubtitle, bilingualFileName);
+          // Collect outputs for UI per-file download & bulk ZIP download (NO auto-download popups!)
+          setTranslationOutputs((prev) => [
+            ...prev.filter((p) => p.key !== translatedOnlyFileName && p.key !== bilingualFileName),
+            { key: translatedOnlyFileName, fileName: translatedOnlyFileName, status: "done", content: translatedOnlySubtitle },
+            { key: bilingualFileName, fileName: bilingualFileName, status: "done", content: bilingualSubtitle },
+          ]);
 
-          // Show success message for single file mode — 行级软失败时降级,
-          // 不跟失败面板唱反调
-          if (!multiLanguageMode && multipleFiles.length <= 1 && !hadRunFailures()) {
-            message.success(t("fileExported", { fileName: `${translatedOnlyFileName}, ${bilingualFileName}` }));
-          }
-
-          // 多语言模式下只把 previewLang(常规跑 = 第一个语言)写入 translatedText
-          // 作 UI 预览;其它语言已通过 downloadFile 自动落盘,UI 不再重复展示
           if (currentTargetLang === previewLang) {
             setTranslatedText(bilingualSubtitle);
             setTranslatedTextExt(bilingualExt);
@@ -579,14 +880,18 @@ const SubtitleTranslator = () => {
         } else {
           // Generate single version based on mode
           const finalSubtitle = generateSubtitle(needsBilingual, translatedLines, currentTargetLang, softFilled);
-          // 原生 ASS 重新排版(双语)产出 v4.00+ → .ass,即使源是 .ssa。
           const fileExt = fileType === "ass" && needsBilingual && assNativeRebuild ? "ass" : getOutputFileExtension(fileType, needsBilingual, bilingualFormat, sourceExt);
           const downloadFileName = generateFileName(fileName, langLabel, fileExt, multiLanguageMode);
 
-          // Always download in multi-language mode
-          if (multiLanguageMode || multipleFiles.length > 1) {
-            await downloadFile(finalSubtitle, downloadFileName);
-          }
+          // Collect output for UI per-file download & bulk ZIP download (NO auto-download popups!)
+          setTranslationOutputs((prev) => [
+            ...prev.filter((p) => p.key !== downloadFileName),
+            { key: downloadFileName, fileName: downloadFileName, status: "done", content: finalSubtitle },
+          ]);
+
+          // Save to persistent Disk Cache (IndexedDB) formatted as ten_goc.[ngon_ngu].[timestamp].[md5].[ext]
+          const inputMd5 = computeFileMd5(sourceText);
+          void saveFileToDiskCache(fileName, currentTargetLang, inputMd5, fileExt, finalSubtitle);
 
           if (currentTargetLang === previewLang) {
             setTranslatedText(finalSubtitle);
@@ -687,27 +992,10 @@ const SubtitleTranslator = () => {
             }
           );
         });
-        // 中途导航离开:后续文件只会逐个快速级联失败,汇总 toast 也会弹在
-        // 用户切去的页面上 —— 直接收工。取消同理:requestCancel 已弹过提示,
-        // 「已导出 (n/m)」的汇总只会把一次主动喊停说成一次半失败。
         if (isDisposed() || isCancelRequested()) return;
       }
 
-      // 非取消结束时把进度钉到 100%,与 JSONTranslator 一致。
-      // 不钉的话:批量里有文件被跳过(格式不支持 / 解码失败)时,makeUpdateProgress
-      // 只走到 (成功文件数/总数)*100 —— 进度条据 percent<100 判为 stopped,对着一次
-      // 用户【没有】取消的运行打「已停止」,并且把 failed / lineFailures 两个信号
-      // 整个丢掉(doneWithFailures 以 done 为前提)。那正是 noteFileFailure 与
-      // translateDoneIncomplete 要覆盖的场景。
-      // 取消的 run 不钉:钉上去等于替一次主动喊停亮绿灯(DONE 态派生自 percent>=100)。
-      // `p > 0 ? 100 : p` 与 runTranslation 的单文件钉【同一条规则】:批量里
-      // 每个文件都在发请求前就失败时(格式不支持 / 解码失败),makeUpdateProgress
-      // 从未跑过、percent 恒为 0,无条件钉会显示 100% 的琥珀色「INCOMPLETE」——
-      // 声称有行保留了原文,而失败面板是空的。进度动过才钉。
       if (!isCancelRequested()) setProgressPercent((p) => (p > 0 ? 100 : p));
-      // 部分/全失败时不报"已导出"(per-file error toast 已经告知细节),只在有成功时显示汇总。
-      // hadRunFailures() 覆盖行级软失败:provider 整体故障时文件"导出成功"但内容
-      // 是原文副本 —— 绿色成功 toast 会跟失败面板自相矛盾,降级为 warning。
       const total = multipleFiles.length;
       const failed = failedFilesRef.current;
       const succeeded = total - failed;
@@ -716,7 +1004,6 @@ const SubtitleTranslator = () => {
       } else if (succeeded > 0) {
         message.warning(`${t("translationExported")} (${succeeded}/${total})`, 10);
       }
-      // 全失败:per-file error toast 已显示,无需再叠加 message
     } finally {
       setIsTranslating(false);
     }
@@ -724,14 +1011,10 @@ const SubtitleTranslator = () => {
 
   const handleExportFile = () => {
     const uploadFileName = multipleFiles[0]?.name || "subtitle";
-    // ResultCard 只在 translatedText 非空时渲染,而 translatedText 写入必伴随 ext/lang
-    // 的同帧 setState,所以 handleExportFile 触发时两者必非 null —— ?? 仅作类型收窄兜底
     const fileExt = translatedTextExt ?? "srt";
     const langLabel = translatedTextLang ?? targetLanguage;
 
-    // Use custom filename if set, otherwise use default pattern
     let fileName = generateFileName(uploadFileName, langLabel, fileExt, multiLanguageMode);
-    // both 模式下的 bilingual 预览要加 _bilingual 后缀,跟翻译时下载的 bilingual 文件名一致
     if (needsBilingualSuffix) {
       fileName = appendBilingualSuffix(fileName);
     }
@@ -744,7 +1027,6 @@ const SubtitleTranslator = () => {
       message.warning(tSubtitle("noSourceText"));
       return;
     }
-    // 复用 sourceFileType useMemo,免重复 detect
     if (!sourceFileType || sourceFileType === "error") {
       message.error(tSubtitle("unsupportedSub"));
       return;
@@ -761,9 +1043,6 @@ const SubtitleTranslator = () => {
     copyToClipboard(extractedText, tSubtitle("textExtracted"));
   };
 
-  // 作废上一轮翻译产物:Clear All 与换/删上传文件时调用,使译文结果、导出元数据、
-  // 失败面板回到"未翻译"初始态。extractedText 是源派生预览,由 prevSourceText
-  // 随 sourceText 变化复位,不在此重复。
   const clearResults = () => {
     setTranslatedText("");
     setTranslatedTextExt(null);
@@ -772,6 +1051,7 @@ const SubtitleTranslator = () => {
     setTranslatedTextLang(null);
     setBilingualTask(null);
     setSplitTask(null);
+    setTranslationOutputs([]);
     clearLiveLines();
     clearFailures();
   };
@@ -785,317 +1065,625 @@ const SubtitleTranslator = () => {
   }, [characterGraphEnabled, translationPhase, isTranslating, progressPercent, t]);
 
   return (
-    <Spin spinning={isFileProcessing} description={t("pleaseWait")} size="large">
-      <Row gutter={[24, 24]}>
-        {/* Left Column: Upload and Main Actions */}
-        <Col xs={24} lg={14} xl={15}>
-          <Card
-            title={
+    <>
+      <Tabs
+        type="card"
+        activeKey={mainTabKey}
+        onChange={setMainTabKey}
+        style={{ marginBottom: 16 }}
+        items={[
+          {
+            key: "context",
+            label: (
               <Space>
-                <InboxOutlined /> {t("sourceArea")}
+                <BookOutlined />
+                <Text strong>📖 Thiết lập Bối cảnh & Nhân vật</Text>
               </Space>
-            }
-            extra={
-              <Space>
-                {fileList.length > 0 && (
-                  <Button
-                    type="text"
-                    icon={collapseInputList ? <DownOutlined /> : <UpOutlined />}
-                    onClick={() => setCollapseInputList(!collapseInputList)}>
-                    {collapseInputList
-                      ? `${t.has("expandList") ? t("expandList") : "Hiện danh sách"} (${fileList.length})`
-                      : t.has("collapseList") ? t("collapseList") : "Thu gọn danh sách"}
-                  </Button>
-                )}
-                <Tooltip title={t("resetUploadTooltip")}>
-                  <Button
-                    type="text"
-                    danger
-                    disabled={isTranslating}
-                    onClick={() => {
-                      resetUpload();
-                      clearResults();
-                      message.success(t("resetUploadSuccess"));
-                    }}
-                    icon={<ClearOutlined />}
-                    aria-label={t("clearAll")}>
-                    {t("clearAll")}
-                  </Button>
-                </Tooltip>
-              </Space>
-            }
-            style={cardStyle}>
-            <Dragger
-              disabled={isTranslating}
-              customRequest={({ file }) => {
-                clearResults();
-                handleFileUpload(file as File);
-              }}
-              accept={uploadFileTypes.accept}
-              multiple={!singleFileMode}
-              showUploadList={!collapseInputList}
-              beforeUpload={singleFileMode ? resetUpload : undefined}
-              onRemove={(file) => {
-                clearResults();
-                return handleUploadRemove(file);
-              }}
-              onChange={handleUploadChange}
-              fileList={fileList}>
-              <p className="ant-upload-drag-icon">
-                <InboxOutlined />
-              </p>
-              <p className="ant-upload-text">{t("dragAndDropText")}</p>
-              <p className="ant-upload-hint">
-                {t("supportedFormats")} {uploadFileTypes.label}
-              </p>
-            </Dragger>
+            ),
+            children: (
+              <Row gutter={[24, 24]}>
+                {/* Left Column: Movie Context Builder */}
+                <Col xs={24} lg={14} xl={15}>
+                  <MovieContextBuilder onProcessingChange={setIsContextProcessing} disabled={isAnyApiRunning} />
+                </Col>
 
-            {collapseInputList && fileList.length > 0 && (
-              <div style={{ marginTop: 8, padding: "8px 12px", background: token.colorFillAlter, borderRadius: token.borderRadiusSM, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  📁 {t.has("filesSelectedCount") ? t("filesSelectedCount", { count: fileList.length }) : `Đã chọn ${fileList.length} tệp phụ đề`}
-                </Text>
-                <Button type="link" size="small" onClick={() => setCollapseInputList(false)}>
-                  {t.has("expandList") ? t("expandList") : "Hiện danh sách"}
-                </Button>
-              </div>
-            )}
-
-            {uploadMode === "single" && (
-              <SourceArea
-                locked={isTranslating}
-                sourceText={sourceText}
-                setSourceText={setSourceText}
-                stats={sourceStats}
-                placeholder={t("pasteUploadContent")}
-                ariaLabel={t("sourceArea")}
-                className="mt-1"
-              />
-            )}
-
-            <Divider />
-
-            <Flex gap="small" wrap className="mt-auto pt-4">
-              <Button
-                type="primary"
-                size="large"
-                icon={<GlobalOutlined spin={isTranslating} />}
-                className="flex-1"
-                onClick={async () => {
-                  if (!bilingualTask?.isProcessing) setBilingualTask(null);
-                  if (!splitTask?.isProcessing) setSplitTask(null);
-
-                  if (sourceFileType === "ass") {
-                    let checkText = sourceText;
-                    if (uploadMode === "multiple" && multipleFiles.length > 0 && !checkText) {
-                      checkText = await new Promise<string>((resolve) => readFile(multipleFiles[0], (text) => resolve(text ?? ""), () => resolve("")));
+                {/* Right Column: Dedicated Context Provider/Model Config */}
+                <Col xs={24} lg={10} xl={9}>
+                  <Card
+                    title={
+                      <Space>
+                        <ApiOutlined />
+                        <Text strong>Cấu hình API & Model Bối cảnh</Text>
+                      </Space>
                     }
-                    if (checkText) {
-                      const styles = parseAssDialogueStyles(checkText);
-                      const detection = detectAssLanguageGroups(styles);
-                      if (detection.mainGroups.length > 1) {
-                        setBilingualTranslateModalOpen(true);
-                        return;
-                      }
-                    }
-                  }
-
-                  if (uploadMode === "single") {
-                    runTranslation(performTranslation, sourceText, contextAware ? "subtitle" : undefined);
-                  } else {
-                    handleMultipleTranslate();
-                  }
-                }}
-                disabled={isTranslating}
-                loading={isTranslating}>
-                {multiLanguageMode ? `${t("translate")} (${targetLanguages.length})` : t("translate")}
-              </Button>
-
-              {(uploadMode === "single" ? !!sourceText : multipleFiles.length > 0) && (
-                <Button size="large" icon={<ShareAltOutlined />} onClick={() => setCharacterGraphModalOpen(true)}>
-                  {tSubtitle.has("viewCharacterGraph") && !tSubtitle("viewCharacterGraph").includes("viewCharacterGraph")
-                    ? tSubtitle("viewCharacterGraph")
-                    : t.has("viewCharacterGraph") && !t("viewCharacterGraph").includes("viewCharacterGraph")
-                    ? t("viewCharacterGraph")
-                    : "Xem đồ thị quan hệ"}
-                </Button>
-              )}
-
-              {uploadMode === "single" && sourceText && (
-                <Button size="large" onClick={handleExtractText} icon={<FormatPainterOutlined />}>
-                  {t("extractText")}
-                </Button>
-              )}
-
-              {(uploadMode === "single" ? !!sourceText : multipleFiles.length > 0) && sourceFileType === "ass" && (
-                <Button size="large" onClick={() => setSplitModalOpen(true)} icon={<ScissorOutlined />}>
-                  {tSubtitle("splitButton")}
-                </Button>
-              )}
-            </Flex>
-
-            {bilingualTask ? (
-              <BackgroundBatchProgressStrip
-                task={bilingualTask}
-                onOpenModal={() => setBilingualTranslateModalOpen(true)}
-                onDismiss={() => setBilingualTask(null)}
-              />
-            ) : splitTask ? (
-              <BackgroundBatchProgressStrip
-                task={splitTask}
-                onOpenModal={() => setSplitModalOpen(true)}
-                onDismiss={() => setSplitTask(null)}
-              />
-            ) : (
-              <TranslationProgressStrip
-                isTranslating={isTranslating}
-                percent={progressPercent}
-                onCancel={requestCancel}
-                resumable={useCache}
-                onDismiss={resetProgress}
-                multiLanguageMode={multiLanguageMode}
-                targetLanguageCount={targetLanguages.length}
-                failed={failedCount > 0 || failedLangs.length > 0 || runHadFailures}
-                lineFailures={failedCount > 0}
-                currentCount={progressInfo.current}
-                totalCount={progressInfo.total}
-                customHeadline={customHeadline}
-                onDownload={translatedText ? handleExportFile : undefined}
-              />
-            )}
-
-            {/* 实时逐行结果 —— 与进度条并行:每定稿一行立即出现,不等整批。
-                ⚠ 只在【跑动时】渲染。它的全部价值是"等待时看见正在发生什么";
-                跑完之后正下方就是完整结果区,再顶着一个不再实时、内容还重复的
-                320px 面板,只是把结果区往下推。进度条不同 —— 它跑完要留成续跑
-                凭据(停在第几行、还能不能续),所以那条自己管自己的 ✕。
-                失败行以琥珀「未译出」标记,细节归下方失败面板。 */}
-            {isTranslating && <LiveTranslationResults store={liveLinesStore} processedCount={progressInfo.current} />}
-          </Card>
-        </Col>
-
-        {/* Right Column: Settings and Configuration */}
-        <Col xs={24} lg={10} xl={9}>
-          <Card
-            title={<Space><SettingOutlined /> {t("configuration")}</Space>}
-            style={cardStyle}
-            extra={
-              <Space>
-                <Tooltip title={t("exportSettingTooltip")}>
-                  <Button
-                    type="text"
-                    icon={<SaveOutlined />}
-                    size="small"
-                    disabled={isTranslating}
-                    onClick={async () => {
-                      await exportSettings();
-                    }}
-                    aria-label={t("exportSettingTooltip")}
-                  />
-                </Tooltip>
-                <Tooltip title={t("importSettingTooltip")}>
-                  <Button
-                    type="text"
-                    icon={<ImportOutlined />}
-                    size="small"
-                    disabled={isTranslating}
-                    onClick={async () => {
-                      await importSettings();
-                    }}
-                    aria-label={t("importSettingTooltip")}
-                  />
-                </Tooltip>
-                <Tooltip title={t("batchEditMultiLangTooltip")}>
-                  <Button type="text" icon={<GlobalOutlined />} size="small" disabled={isTranslating} onClick={() => setMultiLangModalOpen(true)} aria-label={t("batchEditMultiLangTooltip")} />
-                </Tooltip>
-              </Space>
-            }>
-            <Form layout="vertical" className="w-full !mb-3">
-              <LanguageSelector
-                sourceLanguage={sourceLanguage}
-                targetLanguage={targetLanguage}
-                targetLanguages={targetLanguages}
-                multiLanguageMode={multiLanguageMode}
-                handleLanguageChange={handleLanguageChange}
-                handleSwapLanguages={handleSwapLanguages}
-                setTargetLanguages={setTargetLanguages}
-                setMultiLanguageMode={setMultiLanguageMode}
-                disabled={isTranslating}
-              />
-            </Form>
-
-            <ApiStatusBlock disabled={isTranslating} />
-
-            {LLM_MODELS.includes(translationMethod) && (
-              <ContextTranslationBlock
-                enabled={contextAware}
-                onEnabledChange={setContextAware}
-                disabled={isTranslating}
-              />
-            )}
-
-            <Collapse
-              ghost
-              size="small"
-              activeKey={collapseKeys}
-              onChange={(keys) => setCollapseKeys(typeof keys === "string" ? [keys] : keys)}
-              items={[
-                {
-                  key: "subtitle",
-                  label: (
-                    <Space>
-                      <FileTextOutlined />
-                      <Text strong>{tSubtitle("subtitleFormat")}</Text>
-                    </Space>
-                  ),
-                  children: (
-                    <div
-                      style={{
-                        padding: token.paddingSM,
-                        background: "transparent",
-                        border: `1px solid ${token.colorBorderSecondary}`,
-                        borderRadius: token.borderRadiusLG,
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: token.marginXS,
-                      }}>
-                      {sourceText.trim() && sourceFileType === "error" && (
-                        <Alert type="warning" showIcon title={tSubtitle("unsupportedSub")} />
-                      )}
-                      <Segmented
-                        disabled={isTranslating}
-                        block
-                        size="small"
-                        value={exportMode}
-                        onChange={(value) => setExportMode(value as "translatedOnly" | "bilingual" | "both")}
-                        options={[
-                          { label: tSubtitle("translatedOnly"), value: "translatedOnly" },
-                          { label: tSubtitle("bilingual"), value: "bilingual" },
-                          {
-                            label: (
-                              <Tooltip title={tSubtitle("bilingualTooltip")}>
-                                <div>{tSubtitle("exportBoth")}</div>
-                              </Tooltip>
-                            ),
-                            value: "both",
-                          },
-                        ]}
-                      />
-
-                      {needsBilingual && (
-                        <Segmented
-                        disabled={isTranslating}
-                          block
-                          size="small"
-                          value={bilingualOrder}
-                          onChange={(value) => setBilingualOrder(value as BilingualOrder)}
-                          options={[
-                            // i18n key 跟 enum value 同名;UI 文案保留用户视角的"译文在上/下"
-                            { label: tSubtitle("translationFirst"), value: "translationFirst" },
-                            { label: tSubtitle("originalFirst"), value: "originalFirst" },
-                          ]}
+                    style={cardStyle}
+                    extra={
+                      <Space>
+                        <Tooltip title={t("exportSettingTooltip")}>
+                          <Button
+                            type="text"
+                            icon={<SaveOutlined />}
+                            size="small"
+                            disabled={isAnyApiRunning}
+                            onClick={async () => {
+                              await exportSettings();
+                            }}
+                            aria-label={t("exportSettingTooltip")}
+                          />
+                        </Tooltip>
+                        <Tooltip title={t("importSettingTooltip")}>
+                          <Button
+                            type="text"
+                            icon={<ImportOutlined />}
+                            size="small"
+                            disabled={isAnyApiRunning}
+                            onClick={async () => {
+                              await importSettings();
+                            }}
+                            aria-label={t("importSettingTooltip")}
+                          />
+                        </Tooltip>
+                        <Tooltip title="Cấu hình nâng cao Provider">
+                          <Button
+                            type="text"
+                            icon={<GlobalOutlined />}
+                            size="small"
+                            disabled={isAnyApiRunning}
+                            onClick={() => setApiSettingsOpen(true)}
+                            aria-label="Cấu hình nâng cao Provider"
+                          />
+                        </Tooltip>
+                      </Space>
+                    }>
+                    <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 16 }}>
+                      Cấu hình nhà cung cấp AI & Model được sử dụng riêng cho việc phân tích bối cảnh và trích xuất quan hệ nhân vật chi tiết.
+                    </Typography.Paragraph>
+                    <Form layout="vertical">
+                      <Form.Item label="Provider Bối cảnh" style={{ marginBottom: 12 }}>
+                        <Select
+                          value={characterGraphProvider}
+                          onChange={setCharacterGraphProvider}
+                          options={categorizedOptions}
+                          disabled={isAnyApiRunning}
                         />
+                      </Form.Item>
+                      <Form.Item label={`${findMethodLabel(characterGraphProvider)} API Key`} style={{ marginBottom: 12 }}>
+                        <Input.Password
+                          placeholder="API Key cho Bối cảnh"
+                          value={activeGraphConfig.apiKey || ""}
+                          onChange={(e) => updateCharacterGraphConfig(characterGraphProvider, { apiKey: e.target.value })}
+                          disabled={isAnyApiRunning}
+                        />
+                      </Form.Item>
+                      <Form.Item label="Model Bối cảnh (VD: gemini-2.5-flash)" style={{ marginBottom: 12 }}>
+                        <AutoComplete
+                          options={(getProviderModels(characterGraphProvider) as Array<{ label: string; value: string }>).map((m) => ({
+                            label: m.label || m.value,
+                            value: m.value,
+                          }))}
+                          placeholder="Mô hình ID"
+                          value={activeGraphConfig.model || ""}
+                          onChange={(val) => updateCharacterGraphConfig(characterGraphProvider, { model: val ?? "" })}
+                          disabled={isAnyApiRunning}
+                        />
+                      </Form.Item>
+                    </Form>
+                  </Card>
+                </Col>
+              </Row>
+            ),
+          },
+          {
+            key: "translate",
+            label: (
+              <Space>
+                <InboxOutlined />
+                <Text strong>🎬 Dịch phụ đề</Text>
+              </Space>
+            ),
+            children: (
+              <>
+                <Row gutter={[24, 24]}>
+                {/* Left Column: Upload and Main Actions */}
+                <Col xs={24} lg={14} xl={15}>
+                  <Card
+                    title={
+                      <Space>
+                        <InboxOutlined /> {t("sourceArea")}
+                      </Space>
+                    }
+                    extra={
+                      <Space>
+                        {fileList.length > 0 && (
+                          <Button
+                            type="text"
+                            icon={collapseInputList ? <DownOutlined /> : <UpOutlined />}
+                            onClick={() => setCollapseInputList(!collapseInputList)}>
+                            {collapseInputList
+                              ? `${t.has("expandList") ? t("expandList") : "Hiện danh sách"} (${fileList.length})`
+                              : t.has("collapseList") ? t("collapseList") : "Thu gọn danh sách"}
+                          </Button>
+                        )}
+                        <Tooltip title={t("resetUploadTooltip")}>
+                          <Button
+                            type="text"
+                            danger
+                            disabled={isTranslating}
+                            onClick={() => {
+                              resetUpload();
+                              clearResults();
+                              message.success(t("resetUploadSuccess"));
+                            }}
+                            icon={<ClearOutlined />}
+                            aria-label={t("clearAll")}>
+                            {t("clearAll")}
+                          </Button>
+                        </Tooltip>
+                      </Space>
+                    }
+                    style={cardStyle}>
+                    <Dragger
+                      disabled={isTranslating}
+                      customRequest={({ file }) => {
+                        clearResults();
+                        handleFileUpload(file as File);
+                      }}
+                      accept={uploadFileTypes.accept}
+                      multiple={!singleFileMode}
+                      showUploadList={fileQueue.length > 0 ? false : !collapseInputList}
+                      beforeUpload={singleFileMode ? resetUpload : undefined}
+                      onRemove={(file) => {
+                        clearResults();
+                        return handleUploadRemove(file);
+                      }}
+                      onChange={handleUploadChange}
+                      fileList={fileList}>
+                      <p className="ant-upload-drag-icon">
+                        <InboxOutlined />
+                      </p>
+                      <p className="ant-upload-text">{t("dragAndDropText")}</p>
+                      <p className="ant-upload-hint">
+                        {t("supportedFormats")} {uploadFileTypes.label}
+                      </p>
+                    </Dragger>
+
+                    {/* Multi-file Queue Table (Flat Container) */}
+                    {fileQueue.length > 0 && (
+                      <div className="mt-3">
+                        {/* Unified Single Column Title Header */}
+                        <div
+                          style={{
+                            padding: "8px 12px",
+                            background: token.colorFillAlter,
+                            borderRadius: token.borderRadiusSM,
+                            marginBottom: 8,
+                            fontSize: 12,
+                            fontWeight: 600,
+                            color: token.colorTextSecondary,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            border: `1px solid ${token.colorBorderSecondary}`,
+                          }}>
+                          <Space size="small">
+                            <Checkbox
+                              checked={isAllSelected}
+                              indeterminate={isIndeterminate}
+                              onChange={(e) => handleToggleSelectAll(e.target.checked)}
+                            />
+                            <FolderOpenOutlined style={{ color: token.colorPrimary, fontSize: 15 }} />
+                            <span>Tên File Subtitle ({fileQueue.length})</span>
+                          </Space>
+                          <Space size="middle">
+                            <span>Trạng thái & Thao tác</span>
+                          </Space>
+                        </div>
+
+                        {/* File Rows List */}
+                        <Flex vertical gap="small" style={{ maxHeight: 280, overflowY: "auto" }}>
+                          {fileQueue.map((item) => {
+                            const output = translationOutputs.find((o) => o.fileName.includes(item.fileName) || item.fileName.includes(o.fileName));
+                            const isChecked = selectedFileIds.has(item.id);
+
+                            return (
+                              <Card
+                                key={item.id}
+                                size="small"
+                                style={{
+                                  background: isChecked ? token.colorPrimaryBg : token.colorFillAlter,
+                                  borderColor: isChecked ? token.colorPrimaryBorder : token.colorBorderSecondary,
+                                  borderRadius: token.borderRadiusSM,
+                                }}
+                                styles={{ body: { padding: "8px 12px" } }}>
+                                <Flex align="center" justify="space-between" wrap gap={8}>
+                                  <Space size="small" wrap style={{ minWidth: 0, flex: 1 }}>
+                                    <Checkbox
+                                      checked={isChecked}
+                                      onChange={(e) => handleToggleSelectRow(item.id, e.target.checked)}
+                                    />
+                                    <FileTextOutlined style={{ fontSize: 14, color: token.colorPrimary }} />
+                                    <Typography.Text strong ellipsis style={{ fontSize: 12, maxWidth: 200 }}>
+                                      {item.fileName}
+                                    </Typography.Text>
+                                    <Text type="secondary" style={{ fontSize: 11 }}>
+                                      ({Math.round(item.fileSize / 1024)} KB)
+                                    </Text>
+
+                                    {/* Status Tags */}
+                                    {item.status === "translating" && (
+                                      <Tag color="processing" icon={<Spin size="small" style={{ marginRight: 4 }} />}>
+                                        ⏳ Đang dịch...
+                                      </Tag>
+                                    )}
+                                    {item.status === "done" && <Tag color="success" icon={<CheckCircleOutlined />}>✔ Đã dịch</Tag>}
+                                    {item.status === "error" && <Tag color="error" icon={<CloseCircleOutlined />}>❌ Dịch thất bại</Tag>}
+                                  </Space>
+
+                                  {/* Independent Action Icon Buttons Per File */}
+                                  <Space size="small" wrap>
+                                    {(item.status === "pending" || item.status === "error") && (
+                                      <Tooltip title="Bắt đầu dịch file này">
+                                        <Button
+                                          size="small"
+                                          type="primary"
+                                          ghost
+                                          icon={<PlayCircleOutlined />}
+                                          disabled={isTranslating}
+                                          onClick={() => translateSingleQueueItem(item.id)}
+                                        />
+                                      </Tooltip>
+                                    )}
+
+                                    {item.status === "translating" && (
+                                      <Tooltip title="Hủy dịch file này">
+                                        <Button
+                                          size="small"
+                                          danger
+                                          icon={<StopOutlined />}
+                                          onClick={() => cancelSingleQueueItem(item.id)}
+                                        />
+                                      </Tooltip>
+                                    )}
+
+                                    {item.status === "done" && output?.content && (
+                                      <Tooltip title="Tải xuống tệp phụ đề dịch">
+                                        <Button
+                                          size="small"
+                                          type="primary"
+                                          icon={<DownloadOutlined />}
+                                          onClick={() => downloadFile(output.content!, output.fileName)}
+                                        />
+                                      </Tooltip>
+                                    )}
+
+                                    <Tooltip title="Xóa file khỏi danh sách">
+                                      <Button
+                                        size="small"
+                                        danger
+                                        ghost
+                                        icon={<DeleteOutlined />}
+                                        disabled={isTranslating}
+                                        onClick={() => removeSingleFileFromQueue(item.id)}
+                                      />
+                                    </Tooltip>
+                                  </Space>
+                                </Flex>
+
+                                {item.status === "error" && item.errorMessage && (
+                                  <Text type="danger" style={{ fontSize: 11, display: "block", marginTop: 4, marginLeft: 24 }}>
+                                    Lỗi: {item.errorMessage}
+                                  </Text>
+                                )}
+                              </Card>
+                            );
+                          })}
+                        </Flex>
+                      </div>
+                    )}
+
+                    {uploadMode === "single" && (
+                      <SourceArea
+                        locked={isTranslating}
+                        sourceText={sourceText}
+                        setSourceText={setSourceText}
+                        stats={sourceStats}
+                        placeholder={t("pasteUploadContent")}
+                        ariaLabel={t("sourceArea")}
+                        className="mt-1"
+                      />
+                    )}
+
+                    <Divider />
+
+                    {/* Sorted & Compact Action Bar */}
+                    <Flex gap="small" wrap className="mt-auto pt-3" align="center">
+                      {/* 1. Primary Action Button: Translate / Cancel */}
+                      {isTranslating ? (
+                        <Popconfirm
+                          title="Hủy quá trình dịch"
+                          description="Bạn có chắc chắn muốn hủy quá trình dịch các tệp đang chạy không?"
+                          okText="Hủy quá trình dịch"
+                          cancelText="Tiếp tục dịch"
+                          okButtonProps={{ danger: true }}
+                          onConfirm={() => {
+                            requestCancel();
+                            setIsTranslating(false);
+                            message.info("Đã hủy quá trình dịch.");
+                          }}>
+                          <Button
+                            type="primary"
+                            danger
+                            size="middle"
+                            icon={<StopOutlined />}
+                            loading={isTranslating}>
+                            ⏳ Đang dịch... (Bấm để Hủy)
+                          </Button>
+                        </Popconfirm>
+                      ) : (
+                        <Button
+                          type="primary"
+                          size="middle"
+                          icon={<GlobalOutlined spin={isTranslating} />}
+                          onClick={async () => {
+                            if (!bilingualTask?.isProcessing) setBilingualTask(null);
+                            if (!splitTask?.isProcessing) setSplitTask(null);
+
+                            if (sourceFileType === "ass") {
+                              let checkText = sourceText;
+                              if (uploadMode === "multiple" && multipleFiles.length > 0 && !checkText) {
+                                checkText = await new Promise<string>((resolve) => readFile(multipleFiles[0], (text) => resolve(text ?? ""), () => resolve("")));
+                              }
+                              if (checkText) {
+                                const styles = parseAssDialogueStyles(checkText);
+                                const detection = detectAssLanguageGroups(styles);
+                                if (detection.mainGroups.length > 1) {
+                                  setBilingualTranslateModalOpen(true);
+                                  return;
+                                }
+                              }
+                            }
+
+                            if (uploadMode === "single") {
+                              runTranslation(performTranslation, sourceText, contextAware ? "subtitle" : undefined);
+                            } else {
+                              handleTranslateAllQueue();
+                            }
+                          }}
+                          disabled={uploadMode === "multiple" && pendingSelectedCount === 0}>
+                          {uploadMode === "multiple" || fileQueue.length > 0
+                            ? `🚀 Dịch file đã chọn (${pendingSelectedCount})`
+                            : multiLanguageMode
+                            ? `${t("translate")} (${targetLanguages.length})`
+                            : t("translate")}
+                        </Button>
                       )}
+
+                      {/* 2. Download Selected / All Zip Button */}
+                      {fileQueue.length > 0 && (
+                        <Button
+                          size="middle"
+                          icon={isAllSelected ? <FileZipOutlined /> : <DownloadOutlined />}
+                          onClick={handleDownloadSelectedOrAll}
+                          disabled={isTranslating || selectedFileIds.size === 0}>
+                          {isAllSelected ? "Tải tất cả (.zip)" : `Tải file chọn (${selectedFileIds.size})`}
+                        </Button>
+                      )}
+
+                      {/* 3. AI Audit Shortcut Button */}
+                      {fileQueue.some((f) => f.status === "done") && (
+                        <Button
+                          size="middle"
+                          icon={<SearchOutlined />}
+                          onClick={() => setMainTabKey("review")}>
+                          🔍 Kiểm duyệt AI
+                        </Button>
+                      )}
+
+                      {/* 3. Tools: Extract / Split */}
+                      {uploadMode === "single" && sourceText && (
+                        <Button size="middle" onClick={handleExtractText} icon={<FormatPainterOutlined />}>
+                          {t("extractText")}
+                        </Button>
+                      )}
+
+                      {(uploadMode === "single" ? !!sourceText : multipleFiles.length > 0) && sourceFileType === "ass" && (
+                        <Button size="middle" onClick={() => setSplitModalOpen(true)} icon={<ScissorOutlined />}>
+                          Tách song ngữ
+                        </Button>
+                      )}
+
+                      {/* 4. Clear List / Delete Icon Button (With Popconfirm & Tooltip) */}
+                      {fileQueue.length > 0 && (
+                        <Popconfirm
+                          title="Xóa danh sách tệp phụ đề"
+                          description="Bạn có chắc chắn muốn xóa toàn bộ danh sách tệp phụ đề và kết quả dịch hiện tại không?"
+                          okText="Đồng ý xóa"
+                          cancelText="Hủy"
+                          okButtonProps={{ danger: true }}
+                          onConfirm={() => {
+                            resetUpload();
+                            clearResults();
+                            message.info("Đã xóa danh sách tệp phụ đề.");
+                          }}>
+                          <Tooltip title="Xóa toàn bộ danh sách tệp">
+                            <Button
+                              danger
+                              size="middle"
+                              icon={<DeleteOutlined />}
+                              disabled={isTranslating}
+                              aria-label="Xóa danh sách"
+                            />
+                          </Tooltip>
+                        </Popconfirm>
+                      )}
+                    </Flex>
+
+                    {/* Option Row Below */}
+                    {fileQueue.length > 0 && (
+                      <div style={{ marginTop: 8 }}>
+                        <Checkbox
+                          checked={skipCachedFiles}
+                          disabled={isTranslating}
+                          onChange={(e) => setSkipCachedFiles(e.target.checked)}>
+                          <Text style={{ fontSize: 12 }}>Bỏ qua file đã dịch (Cache 24h)</Text>
+                        </Checkbox>
+                      </div>
+                    )}
+
+                    {bilingualTask ? (
+                      <BackgroundBatchProgressStrip
+                        task={bilingualTask}
+                        onOpenModal={() => setBilingualTranslateModalOpen(true)}
+                        onDismiss={() => setBilingualTask(null)}
+                      />
+                    ) : splitTask ? (
+                      <BackgroundBatchProgressStrip
+                        task={splitTask}
+                        onOpenModal={() => setSplitModalOpen(true)}
+                        onDismiss={() => setSplitTask(null)}
+                      />
+                    ) : (
+                      <TranslationProgressStrip
+                        isTranslating={isTranslating}
+                        percent={progressPercent}
+                        onCancel={requestCancel}
+                        resumable={useCache}
+                        onDismiss={resetProgress}
+                        multiLanguageMode={multiLanguageMode}
+                        targetLanguageCount={targetLanguages.length}
+                        failed={failedCount > 0 || failedLangs.length > 0 || runHadFailures}
+                        lineFailures={failedCount > 0}
+                        currentCount={progressInfo.current}
+                        totalCount={progressInfo.total}
+                        customHeadline={customHeadline}
+                      />
+                    )}
+
+                    {isTranslating && <LiveTranslationResults store={liveLinesStore} processedCount={progressInfo.current} />}
+                  </Card>
+                </Col>
+
+                {/* Right Column: Settings and Configuration */}
+                <Col xs={24} lg={10} xl={9}>
+                  <Card
+                    title={<Space><SettingOutlined /> {t("configuration")}</Space>}
+                    style={cardStyle}
+                    extra={
+                      <Space>
+                        <Tooltip title={t("exportSettingTooltip")}>
+                          <Button
+                            type="text"
+                            icon={<SaveOutlined />}
+                            size="small"
+                            disabled={isTranslating}
+                            onClick={async () => {
+                              await exportSettings();
+                            }}
+                            aria-label={t("exportSettingTooltip")}
+                          />
+                        </Tooltip>
+                        <Tooltip title={t("importSettingTooltip")}>
+                          <Button
+                            type="text"
+                            icon={<ImportOutlined />}
+                            size="small"
+                            disabled={isTranslating}
+                            onClick={async () => {
+                              await importSettings();
+                            }}
+                            aria-label={t("importSettingTooltip")}
+                          />
+                        </Tooltip>
+                        <Tooltip title={t("batchEditMultiLangTooltip")}>
+                          <Button type="text" icon={<GlobalOutlined />} size="small" disabled={isTranslating} onClick={() => setMultiLangModalOpen(true)} aria-label={t("batchEditMultiLangTooltip")} />
+                        </Tooltip>
+                      </Space>
+                    }>
+                    <Form layout="vertical" className="w-full !mb-3">
+                      <LanguageSelector
+                        sourceLanguage={sourceLanguage}
+                        targetLanguage={targetLanguage}
+                        targetLanguages={targetLanguages}
+                        multiLanguageMode={multiLanguageMode}
+                        handleLanguageChange={handleLanguageChange}
+                        handleSwapLanguages={handleSwapLanguages}
+                        setTargetLanguages={setTargetLanguages}
+                        setMultiLanguageMode={setMultiLanguageMode}
+                        disabled={isTranslating}
+                      />
+                    </Form>
+
+                    <ApiStatusBlock disabled={isTranslating} />
+
+                    {LLM_MODELS.includes(translationMethod) && (
+                      <ContextTranslationBlock
+                        enabled={contextAware}
+                        onEnabledChange={setContextAware}
+                        disabled={isTranslating}
+                      />
+                    )}
+
+                    <Collapse
+                      ghost
+                      size="small"
+                      activeKey={collapseKeys}
+                      onChange={(keys) => setCollapseKeys(typeof keys === "string" ? [keys] : keys)}
+                      items={[
+                        {
+                          key: "subtitle",
+                          label: (
+                            <Space>
+                              <FileTextOutlined />
+                              <Text strong>{tSubtitle("subtitleFormat")}</Text>
+                            </Space>
+                          ),
+                          children: (
+                            <div
+                              style={{
+                                padding: token.paddingSM,
+                                background: "transparent",
+                                border: `1px solid ${token.colorBorderSecondary}`,
+                                borderRadius: token.borderRadiusLG,
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: token.marginXS,
+                              }}>
+                              {sourceText.trim() && sourceFileType === "error" && (
+                                <Alert type="warning" showIcon title={tSubtitle("unsupportedSub")} />
+                              )}
+                              <Segmented
+                                disabled={isTranslating}
+                                block
+                                size="small"
+                                value={exportMode}
+                                onChange={(value) => setExportMode(value as "translatedOnly" | "bilingual" | "both")}
+                                options={[
+                                  { label: tSubtitle("translatedOnly"), value: "translatedOnly" },
+                                  { label: tSubtitle("bilingual"), value: "bilingual" },
+                                  {
+                                    label: (
+                                      <Tooltip title={tSubtitle("bilingualTooltip")}>
+                                        <div>{tSubtitle("exportBoth")}</div>
+                                      </Tooltip>
+                                    ),
+                                    value: "both",
+                                  },
+                                ]}
+                              />
+
+                              {needsBilingual && (
+                                <Segmented
+                                  disabled={isTranslating}
+                                  block
+                                  size="small"
+                                  value={bilingualOrder}
+                                  onChange={(value) => setBilingualOrder(value as BilingualOrder)}
+                                  options={[
+                                    { label: tSubtitle("translationFirst"), value: "translationFirst" },
+                                    { label: tSubtitle("originalFirst"), value: "originalFirst" },
+                                  ]}
+                                />
+                              )}
 
                       {showBilingualFormatChoice && (
                         <Tooltip title={tSubtitle("bilingualFormatTooltip")}>
@@ -1187,7 +1775,7 @@ const SubtitleTranslator = () => {
         failedLangs={failedLangs}
         reason={failedReason}
         disabled={isTranslating}
-        onRetry={() => runRetry(() => (uploadMode === "single" ? runTranslation(performTranslation, sourceText, contextAware ? "subtitle" : undefined) : handleMultipleTranslate()))}
+        onRetry={() => (uploadMode === "single" ? runTranslation(performTranslation, sourceText, contextAware ? "subtitle" : undefined) : handleMultipleTranslate())}
       />
 
       {/* Results Section */}
@@ -1237,6 +1825,26 @@ const SubtitleTranslator = () => {
       {uploadMode === "single" && translatedText && exportMode === "translatedOnly" && !translatedTextBilingual && failedCount === 0 && (
         <BilingualReviewPanel sourceText={sourceText} sourceFormat={sourceFileType} translatedText={translatedText} translatedFormat={translatedTextExt} />
       )}
+              </>
+            ),
+          },
+          {
+            key: "review",
+            label: (
+              <Space>
+                <SearchOutlined />
+                <Text strong>🔍 Kiểm duyệt & Soát lỗi Subtitle</Text>
+              </Space>
+            ),
+            children: (
+              <SubtitleReviewTab
+                fileQueue={fileQueue}
+                translationOutputs={translationOutputs}
+              />
+            ),
+          },
+        ]}
+      />
 
       <MultiLanguageSettingsModal
         open={multiLangModalOpen}
@@ -1287,7 +1895,7 @@ const SubtitleTranslator = () => {
         sourceLang={sourceLanguage}
         targetLang={targetLanguage}
       />
-    </Spin>
+    </>
   );
 };
 

@@ -499,10 +499,11 @@ export const PROVIDERS = {
     // 只收 low/high,但 3.1-pro-preview 收 low/medium/high,按名字归并会把用户
     // 选的 Medium 静默降级成 Low(与 grok 全线钳 medium 同一类 bug)。
     models: [
-      { label: "Gemini 3.1 Pro (Preview)", value: "gemini-3.1-pro-preview", thinking: true, thinkingLevels: ["low", "medium", "high"] },
       { label: "Gemini 3.7 Flash", value: "gemini-3.7-flash", thinking: true, thinkingLevels: ["low", "medium", "high"] },
+      { label: "Gemini 2.5 Flash", value: "gemini-2.5-flash", thinking: true, thinkingLevels: ["minimal", "low", "medium", "high"] },
       { label: "Gemini 3.5 Flash", value: "gemini-3.5-flash", thinking: true, thinkingLevels: ["minimal", "low", "medium", "high"] },
       { label: "Gemini 3.5 Flash Lite", value: "gemini-3.5-flash-lite", thinking: true, thinkingLevels: ["minimal", "low", "medium", "high"] },
+      { label: "Gemini 3.1 Pro (Preview)", value: "gemini-3.1-pro-preview", thinking: true, thinkingLevels: ["low", "medium", "high"] },
     ],
   },
   qwen: {

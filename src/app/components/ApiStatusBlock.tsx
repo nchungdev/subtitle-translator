@@ -1,10 +1,10 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Select, Input, Button, Tag, Space, Flex, Typography, Tooltip, App, theme } from "antd";
+import { Select, Input, Button, Tag, Space, Flex, Typography, Tooltip, App, theme, AutoComplete } from "antd";
 import { ApiOutlined, BookOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { useTranslations } from "next-intl";
-import { categorizedOptions, findMethodLabel, getConfigStatus, isApiKeyOptional, supportsGlossary, testTranslationWithTimeout, DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT } from "@/app/lib/translation";
+import { categorizedOptions, findMethodLabel, getConfigStatus, getProviderModels, isApiKeyOptional, supportsGlossary, testTranslationWithTimeout, DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT } from "@/app/lib/translation";
 import { describeError } from "@/app/utils";
 import { pingSignature } from "@/app/hooks/translation/validation";
 import { useTranslationContext } from "@/app/components/TranslationContext";
@@ -18,6 +18,47 @@ type StatusState = "free" | "needs-config" | "configured" | "testing" | "connect
 interface ApiStatusBlockProps {
   disabled?: boolean;
 }
+
+const getModelBadges = (value: string) => {
+  const v = value.toLowerCase();
+  if (v.includes("3.7-flash")) {
+    return { cost: "Cực rẻ / Free", quality: "★★★★★", isRecommended: true, badgeText: "Ngon nhất", note: "👑 Thế hệ mới nhất" };
+  }
+  if (v.includes("2.5-flash")) {
+    return { cost: "Cực rẻ / Free", quality: "★★★★☆", isRecommended: false, note: "⚡ Rất mượt • Phổ biến" };
+  }
+  if (v.includes("3.5-flash-lite")) {
+    return { cost: "Siêu rẻ / Free", quality: "★★★☆☆", isRecommended: false, note: "🚀 Tốc độ cao" };
+  }
+  if (v.includes("3.5-flash") || v.includes("1.5-flash")) {
+    return { cost: "Rẻ / Free", quality: "★★★★☆", isRecommended: false, note: "⚡ Cân bằng" };
+  }
+  if (v.includes("3.1-pro") || v.includes("pro-preview") || v.includes("gemini-1.5-pro")) {
+    return { cost: "Trung bình", quality: "★★★★★", isRecommended: false, note: "🧠 Suy luận cao cấp" };
+  }
+  if (v.includes("deepseek-v4-flash") || v.includes("deepseek-chat")) {
+    return { cost: "Cực rẻ", quality: "★★★★★", isRecommended: true, badgeText: "Ngon nhất", note: "👑 Văn phong mượt" };
+  }
+  if (v.includes("deepseek-v4-pro") || v.includes("deepseek-reasoner")) {
+    return { cost: "Rẻ", quality: "★★★★★", isRecommended: false, note: "🧠 Suy luận sâu" };
+  }
+  if (v.includes("gpt-4o-mini") || v.includes("5.4-mini") || v.includes("5.6-luna")) {
+    return { cost: "Rẻ", quality: "★★★★☆", isRecommended: false, note: "⚡ Ổn định" };
+  }
+  if (v.includes("gpt-4o") || v.includes("gpt-5.6")) {
+    return { cost: "Giá cao", quality: "★★★★★", isRecommended: false, note: "💎 Cao cấp" };
+  }
+  if (v.includes("claude-sonnet")) {
+    return { cost: "Giá cao", quality: "★★★★★", isRecommended: true, badgeText: "Đỉnh nhất", note: "👑 Chất lượng cao nhất" };
+  }
+  if (v.includes("claude-haiku")) {
+    return { cost: "Rẻ", quality: "★★★★☆", isRecommended: false, note: "⚡ Tốc độ" };
+  }
+  if (v.includes("claude-opus")) {
+    return { cost: "Giá rất cao", quality: "★★★★★", isRecommended: false, note: "💎 Siêu cao cấp" };
+  }
+  return null;
+};
 
 const ApiStatusBlock = ({ disabled = false }: ApiStatusBlockProps) => {
   const t = useTranslations("common");
@@ -159,55 +200,116 @@ const ApiStatusBlock = ({ disabled = false }: ApiStatusBlockProps) => {
       {/* Mobile: stack Select on top, apiKey input below — 145px-each compact
           row truncates "Custom (OpenAI-compatible)" / "TokenHub (Tencent)"
           beyond recognition. Desktop keeps the dense single-row layout. */}
-      {isMobile ? (
-        <Flex vertical gap={token.marginXS}>
-          <Select
-            showSearch
-            value={translationMethod}
-            onChange={handleMethodChange}
-            options={categorizedOptions}
-            style={{ width: "100%" }}
-            disabled={disabled}
-            aria-label={t("translationAPI")}
-          />
-          {showApiKey && (
-            <Input.Password
-              autoComplete="off"
-              placeholder={`${methodLabel} API Key`}
-              value={config.apiKey as string | undefined}
-              onChange={(e) => handleApiKeyChange(e.target.value)}
-              style={{ width: "100%" }}
-              disabled={disabled}
-              aria-label={`${methodLabel} API Key`}
-            />
-          )}
-        </Flex>
-      ) : (
-        <Space.Compact className="w-full">
-          <Select
-            showSearch
-            value={translationMethod}
-            onChange={handleMethodChange}
-            options={categorizedOptions}
-            style={{ flex: 1, minWidth: 0 }}
-            disabled={disabled}
-            aria-label={t("translationAPI")}
-          />
-          {showApiKey && (
-            <Tooltip title={`${t("enter")} ${methodLabel} API Key`}>
-              <Input.Password
-                autoComplete="off"
-                placeholder="API Key"
-                value={config.apiKey as string | undefined}
-                onChange={(e) => handleApiKeyChange(e.target.value)}
-                style={{ flex: 1, minWidth: 0 }}
-                disabled={disabled}
-                aria-label={`${methodLabel} API Key`}
-              />
-            </Tooltip>
-          )}
-        </Space.Compact>
-      )}
+      {(() => {
+        const showModel = config?.model !== undefined;
+        const providerModels = (getProviderModels(translationMethod) as Array<{ label: string; value: string }>).map((m) => ({
+          label: m.label || m.value,
+          value: m.value,
+        }));
+        return (
+          <>
+            {isMobile ? (
+              <Flex vertical gap={token.marginXS}>
+                <Select
+                  showSearch
+                  value={translationMethod}
+                  onChange={handleMethodChange}
+                  options={categorizedOptions}
+                  style={{ width: "100%" }}
+                  disabled={disabled}
+                  aria-label={t("translationAPI")}
+                />
+                {showApiKey && (
+                  <Input.Password
+                    autoComplete="off"
+                    placeholder={`${methodLabel} API Key`}
+                    value={config?.apiKey as string | undefined}
+                    onChange={(e) => handleApiKeyChange(e.target.value)}
+                    style={{ width: "100%" }}
+                    disabled={disabled}
+                    aria-label={`${methodLabel} API Key`}
+                  />
+                )}
+              </Flex>
+            ) : (
+              <Space.Compact className="w-full">
+                <Select
+                  showSearch
+                  value={translationMethod}
+                  onChange={handleMethodChange}
+                  options={categorizedOptions}
+                  style={{ flex: 1, minWidth: 0 }}
+                  disabled={disabled}
+                  aria-label={t("translationAPI")}
+                />
+                {showApiKey && (
+                  <Tooltip title={`${t("enter")} ${methodLabel} API Key`}>
+                    <Input.Password
+                      autoComplete="off"
+                      placeholder="API Key"
+                      value={config?.apiKey as string | undefined}
+                      onChange={(e) => handleApiKeyChange(e.target.value)}
+                      style={{ flex: 1, minWidth: 0 }}
+                      disabled={disabled}
+                      aria-label={`${methodLabel} API Key`}
+                    />
+                  </Tooltip>
+                )}
+              </Space.Compact>
+            )}
+
+            {showModel && (
+              <Space.Compact className="w-full" style={{ marginTop: 8 }}>
+                <AutoComplete
+                  size="small"
+                  options={providerModels}
+                  placeholder="Mô hình ID (VD: gemini-2.5-flash)"
+                  value={(config?.model as string | undefined) || ""}
+                  onChange={(val) => handleConfigChange(translationMethod, "model", val ?? "")}
+                  style={{ flex: 1 }}
+                  disabled={disabled}
+                  filterOption={(inputValue, option) =>
+                    (option?.value ?? "").toLowerCase().includes(inputValue.toLowerCase()) ||
+                    (option?.label ?? "").toLowerCase().includes(inputValue.toLowerCase())
+                  }
+                  optionRender={(oriOption) => {
+                    const value = String(oriOption.value ?? "");
+                    const label = String(oriOption.label ?? value);
+                    const badge = getModelBadges(value);
+                    return (
+                      <div style={{ paddingBlock: 2 }}>
+                        <Flex align="center" justify="space-between" gap={6}>
+                          <Space size={4}>
+                            <span style={{ fontWeight: badge?.isRecommended ? 600 : 400 }}>{label}</span>
+                            {badge?.isRecommended && (
+                              <Tag color="green" style={{ margin: 0, fontSize: 10, lineHeight: "16px", padding: "0 4px" }}>
+                                {badge?.badgeText || "Ngon nhất"}
+                              </Tag>
+                            )}
+                          </Space>
+                          {badge && (
+                            <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: "16px", padding: "0 4px" }}>
+                              {badge.quality}
+                            </Tag>
+                          )}
+                        </Flex>
+                        <Flex align="center" justify="space-between" style={{ fontSize: 11, color: token.colorTextDescription, marginTop: 2 }}>
+                          <span>{value}</span>
+                          {badge && (
+                            <span>
+                              {badge.note} • Giá: <strong>{badge.cost}</strong>
+                            </span>
+                          )}
+                        </Flex>
+                      </div>
+                    );
+                  }}
+                />
+              </Space.Compact>
+            )}
+          </>
+        );
+      })()}
 
       <Flex justify="space-between" align="center" wrap gap={4} style={{ marginTop: token.marginXS }}>
         <Space size="small" wrap>

@@ -644,26 +644,73 @@ const ServiceSettingsForm = ({ service }: { service: string }) => {
                         const value = String(oriOption.value ?? "");
                         const label = String(oriOption.label ?? value);
                         const isDefault = value === defaultModel;
+                        const v = value.toLowerCase();
+                        let badge: { cost: string; quality: string; isRecommended?: boolean; badgeText?: string; note?: string } | null = null;
+                        if (v.includes("3.7-flash")) {
+                          badge = { cost: "Cực rẻ / Free", quality: "★★★★★", isRecommended: true, badgeText: "Ngon nhất", note: "👑 Thế hệ mới nhất" };
+                        } else if (v.includes("2.5-flash")) {
+                          badge = { cost: "Cực rẻ / Free", quality: "★★★★☆", isRecommended: false, note: "⚡ Rất mượt • Phổ biến" };
+                        } else if (v.includes("3.5-flash-lite")) {
+                          badge = { cost: "Siêu rẻ / Free", quality: "★★★☆☆", note: "🚀 Tốc độ cao" };
+                        } else if (v.includes("3.5-flash") || v.includes("1.5-flash")) {
+                          badge = { cost: "Rẻ / Free", quality: "★★★★☆", note: "⚡ Cân bằng" };
+                        } else if (v.includes("3.1-pro") || v.includes("pro-preview") || v.includes("gemini-1.5-pro")) {
+                          badge = { cost: "Trung bình", quality: "★★★★★", note: "🧠 Suy luận cao cấp" };
+                        } else if (v.includes("deepseek-v4-flash") || v.includes("deepseek-chat")) {
+                          badge = { cost: "Cực rẻ", quality: "★★★★★", isRecommended: true, badgeText: "Ngon nhất", note: "👑 Văn phong mượt" };
+                        } else if (v.includes("deepseek-v4-pro") || v.includes("deepseek-reasoner")) {
+                          badge = { cost: "Rẻ", quality: "★★★★★", note: "🧠 Suy luận sâu" };
+                        } else if (v.includes("gpt-4o-mini") || v.includes("5.4-mini") || v.includes("5.6-luna")) {
+                          badge = { cost: "Rẻ", quality: "★★★★☆", note: "⚡ Ổn định" };
+                        } else if (v.includes("gpt-4o") || v.includes("gpt-5.6")) {
+                          badge = { cost: "Giá cao", quality: "★★★★★", note: "💎 Cao cấp" };
+                        } else if (v.includes("claude-sonnet")) {
+                          badge = { cost: "Giá cao", quality: "★★★★★", isRecommended: true, badgeText: "Đỉnh nhất", note: "👑 Chất lượng cao nhất" };
+                        } else if (v.includes("claude-haiku")) {
+                          badge = { cost: "Rẻ", quality: "★★★★☆", note: "⚡ Tốc độ" };
+                        } else if (v.includes("claude-opus")) {
+                          badge = { cost: "Giá rất cao", quality: "★★★★★", note: "💎 Siêu cao cấp" };
+                        }
+
                         return (
                           <div style={{ paddingBlock: 2 }}>
-                            <Flex align="center" gap={6}>
-                              <span style={{ fontWeight: isDefault ? 600 : 400 }}>{label}</span>
-                              {isDefault && (
-                                <Tag
-                                  style={{
-                                    margin: 0,
-                                    fontSize: 10,
-                                    lineHeight: "16px",
-                                    padding: "0 4px",
-                                    color: token.colorPrimary,
-                                    background: token.colorPrimaryBg,
-                                    borderColor: token.colorPrimaryBorder,
-                                  }}>
-                                  default
+                            <Flex align="center" justify="space-between" gap={6}>
+                              <Space size={4}>
+                                <span style={{ fontWeight: isDefault || badge?.isRecommended ? 600 : 400 }}>{label}</span>
+                                {isDefault && (
+                                  <Tag
+                                    style={{
+                                      margin: 0,
+                                      fontSize: 10,
+                                      lineHeight: "16px",
+                                      padding: "0 4px",
+                                      color: token.colorPrimary,
+                                      background: token.colorPrimaryBg,
+                                      borderColor: token.colorPrimaryBorder,
+                                    }}>
+                                    default
+                                  </Tag>
+                                )}
+                                {badge?.isRecommended && (
+                                  <Tag color="green" style={{ margin: 0, fontSize: 10, lineHeight: "16px", padding: "0 4px" }}>
+                                    {badge?.badgeText || "Ngon nhất"}
+                                  </Tag>
+                                )}
+                              </Space>
+                              {badge && (
+                                <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: "16px", padding: "0 4px" }}>
+                                  {badge.quality}
                                 </Tag>
                               )}
                             </Flex>
-                            {value !== label && <div style={{ fontSize: 12, opacity: 0.55, marginTop: 2 }}>{value}</div>}
+                            <Flex align="center" justify="space-between" style={{ fontSize: 11, opacity: 0.7, marginTop: 2 }}>
+                              <span>{value}</span>
+                              {badge && (
+                                <span>
+                                  {badge.note} • Giá: <strong>{badge.cost}</strong>
+                                </span>
+                              )}
+                            </Flex>
                           </div>
                         );
                       }}

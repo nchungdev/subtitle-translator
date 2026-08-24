@@ -20,6 +20,7 @@ import {
   PREFLIGHT_PROBE_METHODS,
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_USER_PROMPT,
+  buildPromptWithContext,
   translateLines,
   type PipelineRuntimeConfig,
   type FailedLine,
@@ -27,7 +28,7 @@ import {
   type TranslationConfig,
 } from "@/app/lib/translation";
 import { type GlossaryTerm } from "@/app/lib/translation/glossary";
-import { translationCache } from "@/app/lib/storage/indexedDBStorage";
+import { translationCache, computeFileHash } from "@/app/lib/storage/indexedDBStorage";
 // 浏览器专属的那几个(文件下载 / <input type=file> / 依赖 UI 文案的校验)
 import { exportTranslationSettings, createSettingsFileInput, validateTranslationInputs, pingSignature } from "@/app/hooks/translation";
 // 引擎侧:平台无关,与 CLI 共用同一份,一律从 lib/translation 取
@@ -97,6 +98,9 @@ const useTranslationState = () => {
   // setting merged into runtimeConfig at translate time, which is what keeps
   // it under the run-snapshot rule (mid-run edits can't affect the live run).
   const [relayBase, setRelayBase] = useLocalStorage<string>("translation-relayBase", "");
+  const [skipCachedFiles, setSkipCachedFiles] = useLocalStorage<boolean>("translation-skipCachedFiles", true);
+  const [genreStyle, setGenreStyle] = useLocalStorage<string>("subtitle-translator-genreStyle", "default");
+  const [movieSynopsis, setMovieSynopsis] = useLocalStorage<string>("subtitle-translator-movieSynopsis", "");
   const [characterGraphEnabled, setCharacterGraphEnabled] = useLocalStorage<boolean>("subtitle-translator-characterGraphEnabled", false);
   const [characterGraphProvider, setCharacterGraphProvider] = useLocalStorage<string>("subtitle-translator-characterGraphProvider", "gemini");
   const [characterGraphConfigs, setCharacterGraphConfigs] = useLocalStorage<TranslationConfigs>("subtitle-translator-characterGraphConfigs", defaultConfigs as TranslationConfigs);
@@ -642,7 +646,7 @@ const useTranslationState = () => {
         useCache,
         config,
         globals: {
-          systemPrompt: effectiveSystemPrompt,
+          systemPrompt: buildPromptWithContext(effectiveSystemPrompt, genreStyle, movieSynopsis),
           userPrompt: effectiveUserPrompt,
           retryCount,
           requestTimeoutSec,
@@ -651,6 +655,18 @@ const useTranslationState = () => {
         },
         independent,
       });
+
+      // File-level 24h MD5 Cache check
+      const fileHash = await computeFileHash(contentLines.join("\n"), currentTargetLang, translationMethodArg, config.model || "");
+      if (skipCachedFiles) {
+        const cachedResult = await translationCache.getFileCache24h(fileHash);
+        if (cachedResult) {
+          const cachedLines = cachedResult.split("\n");
+          if (cachedLines.length === contentLines.length) {
+            return cachedLines;
+          }
+        }
+      }
 
       const outcome = await translateLines(
         contentLines,
@@ -671,6 +687,10 @@ const useTranslationState = () => {
         documentType,
         meta,
       );
+
+      if (outcome && outcome.lines && outcome.lines.length === contentLines.length) {
+        translationCache.setFileCache24h(fileHash, outcome.lines.join("\n")).catch(() => {});
+      }
 
       if (outcome.rateLimited) rateLimitedThisRunRef.current = true;
       // 原因记忆是【run 级】的,不是单次调用级:记在出错当刻,与本次调用是否
@@ -954,6 +974,12 @@ const useTranslationState = () => {
     setRequestTimeoutSec,
     relayBase,
     setRelayBase,
+    skipCachedFiles,
+    setSkipCachedFiles,
+    genreStyle,
+    setGenreStyle,
+    movieSynopsis,
+    setMovieSynopsis,
     characterGraphEnabled,
     setCharacterGraphEnabled,
     characterGraphProvider,

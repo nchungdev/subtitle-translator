@@ -46,3 +46,48 @@ export const migrateConfig = (saved: TranslationConfig | undefined, defaults: Tr
   }
   return merged as TranslationConfig;
 };
+
+/**
+ * Genre Styles for specialized subtitle translation
+ */
+export interface GenreStyleOption {
+  value: string;
+  label: string;
+  instruction: string;
+}
+
+export const GENRE_STYLE_OPTIONS: GenreStyleOption[] = [
+  { value: "default", label: "Mặc định (Dịch tự nhiên / Chuẩn mực)", instruction: "" },
+  { value: "action", label: "🎬 Hành động / Giật gân", instruction: "Dịch dồn dập, dứt khoát, thoại ngắn gọn, sử dụng khẩu ngữ tự nhiên phù hợp phim hành động." },
+  { value: "comedy", label: "🎭 Hài hước / Sitcom", instruction: "Dịch dí dỏm, hài hước, bắt trend tự nhiên, chọn từ ngữ gây cười phù hợp ngữ cảnh." },
+  { value: "historical", label: "🗡️ Cổ trang / Kiếm hiệp", instruction: "Văn phong trang trọng, mang âm hưởng Hán Việt/Cổ phong, xưng hô tôn ti trật tự cổ đại." },
+  { value: "anime", label: "🌸 Anime / Manga", instruction: "Văn phong trẻ trung, giữ nguyên sắc thái biểu cảm phong phú và văn hóa Anime/Manga." },
+  { value: "romance", label: "💘 Tình cảm / Lãng mạn", instruction: "Văn phong nhẹ nhàng, tinh tế, giàu cảm xúc và sâu lắng phù hợp phim tình cảm." },
+  { value: "horror", label: "💀 Kinh dị / Trinh thám", instruction: "Văn phong u uất, kịch tính, lôi cuốn, tạo cảm giác hồi hộp bí ẩn." },
+  { value: "documentary", label: "🧪 Tài liệu / Khoa học", instruction: "Văn phong chuẩn mực, khách quan, chính xác tuyệt đối về thuật ngữ chuyên ngành." },
+];
+
+export const buildPromptWithContext = (
+  baseSystemPrompt: string,
+  genreStyle?: string,
+  movieSynopsis?: string
+): string => {
+  let decorated = baseSystemPrompt;
+  const genreOpt = GENRE_STYLE_OPTIONS.find((g) => g.value === genreStyle && g.instruction);
+
+  if (movieSynopsis?.trim() || genreOpt) {
+    const extraBlocks: string[] = [];
+
+    if (movieSynopsis?.trim()) {
+      extraBlocks.push(`[Movie Synopsis / Plot Context]:\n${movieSynopsis.trim()}`);
+    }
+
+    if (genreOpt) {
+      extraBlocks.push(`[Genre Translation Style Requirement]:\n${genreOpt.instruction}`);
+    }
+
+    decorated = `${decorated}\n\n### MOVIE CONTEXT & GENRE STYLE INSTRUCTIONS:\n${extraBlocks.join("\n\n")}`;
+  }
+
+  return decorated;
+};
