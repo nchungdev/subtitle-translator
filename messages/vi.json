@@ -35,6 +35,7 @@
     "nameRequired": "Vui lòng nhập tên bảng thuật ngữ"
   },
   "common": {
+    "download": "Tải xuống",
     "showResults": "Hiện chi tiết",
     "hideResults": "Thu gọn",
     "supportEscapeChars": "Hỗ trợ ký tự thoát: \\n (dòng mới), \\r (xuống dòng), \\t (tab), \\s (dấu cách), \\\\ (dấu gạch chéo ngược)",

@@ -35,6 +35,7 @@
     "nameRequired": "Glossary name required"
   },
   "common": {
+    "download": "Download",
     "showResults": "Show details",
     "hideResults": "Hide details",
     "supportEscapeChars": "Supports escape chars: \\n (newline), \\r (return), \\t (tab), \\s (space), \\\\ (backslash)",

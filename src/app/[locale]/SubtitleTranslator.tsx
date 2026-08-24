@@ -47,6 +47,8 @@ import {
   appendBilingualSuffix,
   assembleSubtitleOutput,
   SUBTITLE_DEFAULTS,
+  parseAssDialogueStyles,
+  detectAssLanguageGroups,
   type BilingualFormat,
   type AssStyleConfig,
   type AssStylePreset,
@@ -165,11 +167,11 @@ const BackgroundBatchProgressStrip = ({
           {title}
         </Text>
         <Space size="small">
-          {doneItems.length > 0 && (
             <Button size="small" type="primary" icon={<DownloadOutlined />} onClick={handleDownloadAllCompleted}>
-              {doneItems.length > 1 ? `${t("download")} (${doneItems.length})` : t("download")}
+              {doneItems.length > 1
+                ? `${tSubtitle.has("download") ? tSubtitle("download") : "Tải xuống"} (${doneItems.length})`
+                : tSubtitle.has("download") ? tSubtitle("download") : "Tải xuống"}
             </Button>
-          )}
           <Button
             size="small"
             type="text"
@@ -879,9 +881,25 @@ const SubtitleTranslator = () => {
                 size="large"
                 icon={<GlobalOutlined spin={isTranslating} />}
                 className="flex-1"
-                onClick={() => {
+                onClick={async () => {
                   if (!bilingualTask?.isProcessing) setBilingualTask(null);
                   if (!splitTask?.isProcessing) setSplitTask(null);
+
+                  if (sourceFileType === "ass") {
+                    let checkText = sourceText;
+                    if (uploadMode === "multiple" && multipleFiles.length > 0 && !checkText) {
+                      checkText = await new Promise<string>((resolve) => readFile(multipleFiles[0], (text) => resolve(text ?? ""), () => resolve("")));
+                    }
+                    if (checkText) {
+                      const styles = parseAssDialogueStyles(checkText);
+                      const detection = detectAssLanguageGroups(styles);
+                      if (detection.mainGroups.length > 1) {
+                        setBilingualTranslateModalOpen(true);
+                        return;
+                      }
+                    }
+                  }
+
                   if (uploadMode === "single") {
                     runTranslation(performTranslation, sourceText, contextAware ? "subtitle" : undefined);
                   } else {
@@ -912,12 +930,6 @@ const SubtitleTranslator = () => {
               {(uploadMode === "single" ? !!sourceText : multipleFiles.length > 0) && sourceFileType === "ass" && (
                 <Button size="large" onClick={() => setSplitModalOpen(true)} icon={<ScissorOutlined />}>
                   {tSubtitle("splitButton")}
-                </Button>
-              )}
-
-              {(uploadMode === "single" ? !!sourceText : multipleFiles.length > 0) && sourceFileType === "ass" && (
-                <Button size="large" onClick={() => setBilingualTranslateModalOpen(true)} icon={<BranchesOutlined />}>
-                  {tSubtitle("bilingualTranslateButton")}
                 </Button>
               )}
             </Flex>
