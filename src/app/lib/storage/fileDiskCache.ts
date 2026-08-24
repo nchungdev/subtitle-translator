@@ -227,3 +227,45 @@ export const getDiskCacheCount = async (): Promise<number> => {
     return 0;
   }
 };
+
+/**
+ * Get all cached items metadata from IndexedDB
+ */
+export const getAllDiskCacheItems = async (): Promise<DiskCacheItem[]> => {
+  try {
+    const db = await openDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_NAME, "readonly");
+      const request = tx.objectStore(STORE_NAME).getAll();
+      request.onsuccess = () => resolve((request.result as DiskCacheItem[]) || []);
+      request.onerror = () => resolve([]);
+    });
+  } catch {
+    return [];
+  }
+};
+
+/**
+ * Clear all cached files in IndexedDB disk storage
+ */
+export const clearAllDiskCache = async (): Promise<number> => {
+  try {
+    const db = await openDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      const store = tx.objectStore(STORE_NAME);
+      const countReq = store.count();
+
+      countReq.onsuccess = () => {
+        const total = countReq.result;
+        const clearReq = store.clear();
+        clearReq.onsuccess = () => resolve(total);
+        clearReq.onerror = () => resolve(0);
+      };
+      countReq.onerror = () => resolve(0);
+    });
+  } catch (err) {
+    console.error("Failed to clear all disk cache:", err);
+    return 0;
+  }
+};

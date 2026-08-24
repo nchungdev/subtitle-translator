@@ -7,7 +7,6 @@ import {
   CopyOutlined,
   InboxOutlined,
   FileTextOutlined,
-  ClearOutlined,
   FormatPainterOutlined,
   GlobalOutlined,
   ImportOutlined,
@@ -31,6 +30,7 @@ import {
   StopOutlined,
   DeleteOutlined,
   SearchOutlined,
+  ClearOutlined,
 } from "@ant-design/icons";
 import SubtitleReviewTab from "@/app/components/SubtitleReviewTab";
 import { useTranslations } from "next-intl";
@@ -43,7 +43,8 @@ import { useResetOnSourceChange } from "@/app/hooks/useResetOnSourceChange";
 import { useLocalStorage } from "@/app/hooks/useLocalStorage";
 import { useTextStats } from "@/app/hooks/useTextStats";
 import { useExportFilename } from "@/app/hooks/useExportFilename";
-import { computeFileMd5, getCachedFileByMd5, saveFileToDiskCache } from "@/app/lib/storage/fileDiskCache";
+import { computeFileMd5, getCachedFileByMd5, saveFileToDiskCache, deleteDiskCacheItem, clearAllDiskCache } from "@/app/lib/storage/fileDiskCache";
+import { translationCache } from "@/app/lib/storage/indexedDBStorage";
 
 import { splitTextIntoLines, downloadFile, applyRemoveCharsToLines, describeError, isAbortError, isCascadedAbort, isNetworkError, getFileTypePresetConfig } from "@/app/utils";
 import {
@@ -1356,6 +1357,33 @@ const SubtitleTranslator = () => {
                                       </Tooltip>
                                     )}
 
+                                    {item.inputMd5 && (
+                                      <Tooltip title="Xóa bản dịch đã lưu trong Cache cho tệp này">
+                                        <Popconfirm
+                                          title="Xóa cache tệp này?"
+                                          description="Bạn có chắc chắn muốn xóa bản dịch đã lưu trong cache cho tệp này không?"
+                                          okText="Xóa Cache"
+                                          cancelText="Hủy"
+                                          okButtonProps={{ danger: true }}
+                                          onConfirm={async () => {
+                                            const cacheId = `${item.inputMd5}::${targetLanguage}`;
+                                            await deleteDiskCacheItem(cacheId);
+                                            setTranslationOutputs((prev) => prev.filter((o) => !o.fileName.includes(item.fileName)));
+                                            setFileQueue((prev) =>
+                                              prev.map((f) => (f.id === item.id ? { ...f, status: "pending", cachedFileName: undefined } : f))
+                                            );
+                                            message.success(`Đã xóa cache tệp: ${item.fileName}`);
+                                          }}>
+                                          <Button
+                                            size="small"
+                                            danger
+                                            icon={<ClearOutlined />}
+                                            disabled={isTranslating}
+                                          />
+                                        </Popconfirm>
+                                      </Tooltip>
+                                    )}
+
                                     <Tooltip title="Xóa file khỏi danh sách">
                                       <Button
                                         size="small"
@@ -1491,6 +1519,38 @@ const SubtitleTranslator = () => {
                           Tách song ngữ
                         </Button>
                       )}
+
+                      {/* 5. Clear Cache Button */}
+                      <Popconfirm
+                        title="Xóa bộ nhớ đệm Cache phụ đề"
+                        description="Bạn có chắc muốn xóa toàn bộ các tệp phụ đề đã dịch & câu dịch đệm? (Giữ nguyên bối cảnh & nhân vật)"
+                        okText="Xóa Cache Phụ đề"
+                        cancelText="Hủy"
+                        okButtonProps={{ danger: true }}
+                        onConfirm={async () => {
+                          try {
+                            const diskCount = await clearAllDiskCache();
+                            const lineCount = await translationCache.clear();
+                            setTranslationOutputs([]);
+                            setFileQueue((prev) =>
+                              prev.map((item) => ({ ...item, status: "pending", cachedFileName: undefined }))
+                            );
+                            message.success(`Đã xóa cache phụ đề! (${diskCount} tệp & ${lineCount} câu dịch - Giữ nguyên bối cảnh & nhân vật)`);
+                          } catch (err) {
+                            message.error("Lỗi khi xóa bộ nhớ cache.");
+                          }
+                        }}>
+                        <Tooltip title="Xóa toàn bộ Cache file phụ đề đã dịch (Giữ nguyên bối cảnh & nhân vật)">
+                          <Button
+                            size="middle"
+                            danger
+                            ghost
+                            icon={<ClearOutlined />}
+                            disabled={isTranslating}>
+                            Xóa Cache phụ đề
+                          </Button>
+                        </Tooltip>
+                      </Popconfirm>
 
                       {/* 4. Clear List / Delete Icon Button (With Popconfirm & Tooltip) */}
                       {fileQueue.length > 0 && (

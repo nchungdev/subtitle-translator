@@ -1,14 +1,16 @@
 "use client";
 
-import React, { useState } from "react";
-import { AutoComplete, ConfigProvider, Flex, Input, InputNumber, Row, Col, Tooltip, Switch, Form, Typography, theme, Select, Tag, Space, Button, App } from "antd";
-import { ApiOutlined, ThunderboltOutlined } from "@ant-design/icons";
+import React, { useState, useEffect } from "react";
+import { AutoComplete, ConfigProvider, Flex, Input, InputNumber, Row, Col, Tooltip, Switch, Form, Typography, theme, Select, Tag, Space, Button, App, Popconfirm } from "antd";
+import { ApiOutlined, ThunderboltOutlined, DeleteOutlined, ClearOutlined } from "@ant-design/icons";
 import { useTranslations } from "next-intl";
 import Section from "@/app/components/styled/Section";
 import { getProviderModels, GENRE_STYLE_OPTIONS } from "@/app/lib/translation";
 import { extractCharacterGraphFromText } from "@/app/lib/translation/characterGraphService";
 import { describeError } from "@/app/utils";
 import { useTranslationContext } from "@/app/components/TranslationContext";
+import { clearAllDiskCache, getDiskCacheCount } from "@/app/lib/storage/fileDiskCache";
+import { translationCache } from "@/app/lib/storage/indexedDBStorage";
 
 const { Text } = Typography;
 
@@ -175,6 +177,36 @@ const AdvancedTranslationSettings: React.FC<AdvancedTranslationSettingsProps> = 
               <Text>{t("useCache")}</Text>
             </Tooltip>
             <Switch size="small" checked={useCache} onChange={setUseCache} aria-label={t("useCache")} />
+          </Flex>
+
+          <Flex justify="space-between" align="center" style={{ marginTop: 4, paddingTop: 6, borderTop: `1px dashed ${token.colorBorderSecondary}` }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              💾 Đang lưu bộ nhớ đệm Cache tệp đã dịch
+            </Text>
+            <Popconfirm
+              title="Xóa Cache tệp phụ đề?"
+              description="Bạn có chắc chắn muốn xóa tất cả file phụ đề đã dịch & câu dịch trong bộ nhớ đệm? (Giữ nguyên bối cảnh & nhân vật)"
+              okText="Xóa Cache Phụ đề"
+              cancelText="Hủy"
+              okButtonProps={{ danger: true }}
+              onConfirm={async () => {
+                try {
+                  const diskCleared = await clearAllDiskCache();
+                  const lineCleared = await translationCache.clear();
+                  message.success(`Đã xóa sạch cache phụ đề! (${diskCleared} tệp & ${lineCleared} câu dịch - Giữ nguyên bối cảnh & nhân vật)`);
+                } catch {
+                  message.error("Không thể xóa cache.");
+                }
+              }}>
+              <Button
+                size="small"
+                danger
+                type="link"
+                icon={<ClearOutlined />}
+                style={{ padding: 0, fontSize: 12 }}>
+                Xóa sạch Cache
+              </Button>
+            </Popconfirm>
           </Flex>
         </Flex>
       </Section>
